@@ -1,0 +1,11 @@
+.venv/
+.env
+.env.*
+__pycache__/
+*.pyc
+.DS_Store
+*.egg-info/
+
+.next/
+
+.next/

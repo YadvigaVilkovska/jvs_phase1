@@ -1,0 +1,47 @@
+ [project]
+ name = "jeeves"
+ version = "0.1.0"
+ description = "Jeeves: chat-first agent with NormalizedUserRequest, correction loop, ExecutionDecision, layered memory, and LangGraph orchestration."
+ readme = "README.md"
+ requires-python = ">=3.11"
+ dependencies = [
+   "fastapi>=0.115",
+   "uvicorn>=0.30",
+   "pydantic>=2.7",
+   "pydantic-settings>=2.3",
+  "pydantic-ai>=0.0.15",
+   "langgraph>=0.2",
+   "httpx>=0.27",
+   "sqlmodel>=0.0.22",
+  "alembic>=1.13",
+ ]
+ 
+ [project.optional-dependencies]
+ dev = [
+   "pytest>=8.0",
+   "pytest-asyncio>=0.23",
+   "ruff>=0.5",
+ ]
+ ui = [
+   "streamlit>=1.28",
+ ]
+ 
+ [tool.pytest.ini_options]
+ asyncio_mode = "auto"
+ testpaths = ["tests"]
+ 
+ [tool.ruff]
+ line-length = 100
+ target-version = "py311"
+ 
+ [tool.ruff.lint]
+ select = ["E", "F", "I", "UP", "B"]
+ ignore = ["E501"]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app", "app.llm"]
+ 
