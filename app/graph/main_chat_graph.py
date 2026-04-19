@@ -47,6 +47,12 @@ def _render_normalized(req: NormalizedUserRequest) -> str:
 
 
 def _is_explicit_memory_command(text: str) -> bool:
+    """True if the message is routed as an explicit memory command (narrow prefix heuristic only).
+
+    Only trimmed text starting with Russian «запомни» or English «remember» (case-insensitive) matches.
+    This is not a general intent classifier; other phrasings are handled as normal chat. See
+    docs/PHASE1_MEMORY.md.
+    """
     t = text.strip().lower()
     return t.startswith("запомни") or t.startswith("remember")
 

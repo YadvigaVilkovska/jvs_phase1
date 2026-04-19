@@ -3,9 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.settings import settings
+
+_engine: Engine | None = None
 
 
 def validate_database_url(url: str) -> None:
@@ -52,15 +55,20 @@ def _ensure_sqlite_parent_dir(url: str) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
 
 
-def get_engine():
+def get_engine() -> Engine:
+    """Return a process-wide engine instance (lazy singleton for the current settings)."""
+    global _engine
+    if _engine is not None:
+        return _engine
     validate_database_url(settings.database_url)
     _ensure_sqlite_parent_dir(settings.database_url)
     try:
-        return create_engine(settings.database_url, echo=False)
+        _engine = create_engine(settings.database_url, echo=False)
     except Exception as e:
         raise RuntimeError(
             f"Could not create database engine (check DATABASE_URL and connectivity): {e}"
         ) from e
+    return _engine
 
 
 def create_db_and_tables() -> None:

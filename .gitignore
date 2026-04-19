@@ -1,11 +1,15 @@
 .venv/
 .env
 .env.*
+!.env.example
 __pycache__/
 *.pyc
 .DS_Store
 *.egg-info/
 
-.next/
+data/
+*.db
+*.sqlite
+*.sqlite3
 
 .next/

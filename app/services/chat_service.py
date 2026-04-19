@@ -115,12 +115,19 @@ class ChatService:
         Close chat and trigger post-chat memory analysis (candidates only).
 
         This keeps strict separation: analysis creates candidates, confirmation happens via memory endpoints.
+
+        Post-chat extraction runs until it completes successfully once (`chats.post_chat_extraction_completed`).
+        Duplicate `/chat/close` calls do not create duplicate post-chat candidates. If extraction raises
+        after the chat was already marked closed, a later close retries extraction (flag stays false).
         """
         chat = self.chat_repo.get_chat(chat_id)
         if not chat:
             raise ValueError("chat not found")
-        self.chat_repo.close_chat(chat_id)
-        await run_post_chat_analysis(session=self.session, chat_id=chat_id)
+        if not chat.post_chat_extraction_completed:
+            if chat.status != "closed":
+                self.chat_repo.close_chat(chat_id)
+            await run_post_chat_analysis(session=self.session, chat_id=chat_id)
+            self.chat_repo.mark_post_chat_extraction_completed(chat_id)
         state = self._load_state(chat_id)
         state.chat_closed = True
         return ChatTurnResult(state=state)

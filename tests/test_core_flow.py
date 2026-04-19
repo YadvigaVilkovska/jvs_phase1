@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import pytest
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel import select
@@ -5,7 +7,7 @@ from sqlmodel import select
 from app.domain.execution_decision import ExecutionDecision
 from app.domain.memory_candidate import MemoryCandidate
 from app.domain.normalized_user_request import NormalizedUserRequest
-from app.repositories.models import MemoryCandidateRow, MemoryEntryRow, NormalizedRequestRow
+from app.repositories.models import Chat, MemoryCandidateRow, MemoryEntryRow, NormalizedRequestRow
 from app.settings import settings
 from app.services.memory_service import MemoryService
 from app.services.chat_service import ChatService
@@ -217,8 +219,15 @@ async def test_correction_creates_new_revision_same_object_contract(session: Ses
     assert len(turn2.state.normalized_request_history) >= 2
 
 
+@pytest.mark.parametrize(
+    "user_message",
+    [
+        "запомни что я люблю короткие ответы",
+        "remember that I prefer short answers",
+    ],
+)
 @pytest.mark.asyncio
-async def test_explicit_memory_command_creates_candidate_not_durable_entry(session: Session):
+async def test_explicit_memory_prefix_creates_candidate_not_durable_entry(session: Session, user_message: str):
     svc = ChatService(
         session=session,
         normalization_agent=FakeNormalizationAgent(),
@@ -226,7 +235,7 @@ async def test_explicit_memory_command_creates_candidate_not_durable_entry(sessi
     )
     state0 = svc.start_chat(user_id="u1")
 
-    turn1 = await svc.post_user_message(chat_id=state0.chat_id, user_message="запомни что я люблю короткие ответы")
+    turn1 = await svc.post_user_message(chat_id=state0.chat_id, user_message=user_message)
     assert turn1.state.execution_decision is None
 
     candidates = list(session.exec(select(MemoryCandidateRow).where(MemoryCandidateRow.chat_id == state0.chat_id)))
@@ -268,6 +277,64 @@ async def test_close_chat_triggers_post_chat_analysis_safely(session: Session):
     await svc.post_user_message(chat_id=state0.chat_id, user_message="hello")
     closed = await svc.close(chat_id=state0.chat_id)
     assert closed.state.chat_closed is True
+
+
+@pytest.mark.asyncio
+async def test_second_close_does_not_rerun_post_chat_analysis(session: Session):
+    svc = ChatService(
+        session=session,
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="hello")
+
+    calls: list[str] = []
+
+    async def track_post_chat(*, session, chat_id: str) -> int:
+        calls.append(chat_id)
+        return 0
+
+    with patch("app.services.chat_service.run_post_chat_analysis", side_effect=track_post_chat):
+        await svc.close(chat_id=state0.chat_id)
+        await svc.close(chat_id=state0.chat_id)
+
+    assert calls == [state0.chat_id]
+
+
+@pytest.mark.asyncio
+async def test_close_retries_post_chat_after_failed_extraction(session: Session):
+    svc = ChatService(
+        session=session,
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="hello")
+
+    attempts = 0
+
+    async def flaky_post_chat(*, session, chat_id: str) -> int:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient extraction failure")
+        return 0
+
+    with patch("app.services.chat_service.run_post_chat_analysis", side_effect=flaky_post_chat):
+        with pytest.raises(RuntimeError):
+            await svc.close(chat_id=state0.chat_id)
+        row = session.get(Chat, state0.chat_id)
+        assert row is not None
+        assert row.status == "closed"
+        assert row.post_chat_extraction_completed is False
+
+        await svc.close(chat_id=state0.chat_id)
+
+    row2 = session.get(Chat, state0.chat_id)
+    assert row2 is not None
+    assert row2.post_chat_extraction_completed is True
+    assert attempts == 2
 
 
 def test_graph_contains_required_node_names(session: Session):

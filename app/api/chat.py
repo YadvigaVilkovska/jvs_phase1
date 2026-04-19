@@ -134,7 +134,7 @@ class CloseChatRequest(BaseModel):
 
     chat_id: str = Field(
         min_length=1,
-        description="Closes the chat and runs **post-chat memory candidate** extraction in-process (candidates only; confirm via `/memory/...`).",
+        description="Closes the chat and runs **post-chat memory candidate** extraction in-process (candidates only; confirm via `/memory/...`). After a **successful** extraction run, repeat closes do not re-run it. If extraction **fails**, call again to retry (chat may already be closed).",
         examples=["550e8400-e29b-41d4-a716-446655440000"],
     )
 

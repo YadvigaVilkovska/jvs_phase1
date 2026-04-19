@@ -5,6 +5,7 @@ Post-chat memory candidate analysis.
 
 v1 behavior (honest):
 - The analysis logic runs in-process when `run_post_chat_analysis` is called (e.g. from `POST /chat/close`).
+- `ChatService.close` records successful completion on `chats.post_chat_extraction_completed` so duplicate closes do not re-run extraction or duplicate post-chat candidates; a failed run leaves the flag false so close can retry.
 - There is no production-grade queue/worker (Redis/Celery/RQ) wired yet; that remains out of scope for v1.
 - This module is the single entry point a future worker would call unchanged.
 """

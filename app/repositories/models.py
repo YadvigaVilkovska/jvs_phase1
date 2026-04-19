@@ -20,6 +20,8 @@ class Chat(SQLModel, table=True):
     status: str = Field(default="open", index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     closed_at: Optional[datetime] = Field(default=None)
+    # True after successful completion of run_post_chat_analysis for this chat (incl. zero candidates).
+    post_chat_extraction_completed: bool = Field(default=False)
 
 
 class Message(SQLModel, table=True):

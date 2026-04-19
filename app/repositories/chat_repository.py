@@ -38,6 +38,14 @@ class ChatRepository:
         self.session.add(chat)
         self.session.commit()
 
+    def mark_post_chat_extraction_completed(self, chat_id: str) -> None:
+        chat = self.session.get(Chat, chat_id)
+        if not chat:
+            return
+        chat.post_chat_extraction_completed = True
+        self.session.add(chat)
+        self.session.commit()
+
     def set_chat_status(self, chat_id: str, status: str) -> None:
         chat = self.session.get(Chat, chat_id)
         if not chat:
