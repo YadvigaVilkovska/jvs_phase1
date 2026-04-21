@@ -37,12 +37,32 @@ class MemoryRepository:
             stmt = stmt.where(MemoryCandidateRow.chat_id == chat_id)
         return list(self.session.exec(stmt.order_by(MemoryCandidateRow.created_at.asc())))
 
-    def has_pending_equivalent_normalized_memory(self, *, chat_id: str, normalized_memory: str) -> bool:
-        """True if a pending candidate with the same normalized text already exists for this chat."""
+    def has_pending_equivalent_normalized_memory(
+        self,
+        *,
+        chat_id: str,
+        normalized_memory: str,
+        memory_type: str | None = None,
+        target_layer: str | None = None,
+        source: str | None = None,
+    ) -> bool:
+        """
+        True if a pending candidate with the same semantic identity already exists for this chat.
+
+        The text alone is not enough, because the same phrase may be meaningful as a different memory
+        type, layer, or source.
+        """
         key = _normalized_memory_key(normalized_memory)
         for row in self.list_candidates(chat_id=chat_id):
-            if _normalized_memory_key(row.normalized_memory) == key:
-                return True
+            if _normalized_memory_key(row.normalized_memory) != key:
+                continue
+            if memory_type is not None and row.memory_type != memory_type:
+                continue
+            if target_layer is not None and row.target_layer != target_layer:
+                continue
+            if source is not None and row.source != source:
+                continue
+            return True
         return False
 
     def get_candidate(self, candidate_id: str) -> MemoryCandidateRow | None:
@@ -69,4 +89,3 @@ class MemoryRepository:
         self.session.commit()
         self.session.refresh(row)
         return row
-

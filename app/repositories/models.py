@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -9,7 +9,7 @@ from sqlmodel import Field, SQLModel
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 class Chat(SQLModel, table=True):
@@ -119,4 +119,3 @@ class CoreProfileEntryRow(SQLModel, table=True):
     @staticmethod
     def dumps_value(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
-

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlmodel import Session, select
 
@@ -34,7 +34,7 @@ class ChatRepository:
         if not chat:
             return
         chat.status = "closed"
-        chat.closed_at = datetime.utcnow()
+        chat.closed_at = datetime.now(timezone.utc)
         self.session.add(chat)
         self.session.commit()
 
@@ -150,4 +150,3 @@ class ChatRepository:
         self.session.commit()
         self.session.refresh(row)
         return row
-

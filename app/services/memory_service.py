@@ -5,6 +5,7 @@ from sqlmodel import Session
 from app.agents.memory_agent import MemoryAgent
 from app.domain.memory_candidate import MemoryCandidate
 from app.domain.memory_entry import MemoryEntry
+from app.repositories.models import Chat
 from app.repositories.memory_repository import MemoryRepository
 
 
@@ -26,6 +27,12 @@ class MemoryService:
         if not row or row.status != "candidate":
             raise ValueError("candidate not found or not pending")
 
+        chat = self.session.get(Chat, row.chat_id)
+        if not chat:
+            raise ValueError("candidate chat not found")
+        if chat.user_id != user_id:
+            raise ValueError("candidate does not belong to this user")
+
         self.repo.set_candidate_status(candidate_id, "confirmed")
         entry = MemoryEntry(
             memory_type=row.memory_type,  # type: ignore[arg-type]
@@ -41,4 +48,3 @@ class MemoryService:
         if not row or row.status != "candidate":
             raise ValueError("candidate not found or not pending")
         self.repo.set_candidate_status(candidate_id, "rejected")
-

@@ -14,136 +14,203 @@ CHAT_HTML = """
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>Jeeves Chat</title>
   <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --panel: rgba(15, 23, 42, 0.92);
+      --panel-strong: rgba(17, 24, 39, 0.96);
+      --line: rgba(148, 163, 184, 0.16);
+      --text: #e8ecf1;
+      --muted: #9aa4b2;
+      --accent-strong: #2563eb;
+      --radius-xl: 24px;
+      --radius-lg: 18px;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+    }
     body {
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-      background: #0b1020;
-      color: #e8ecf1;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", sans-serif;
+      background:
+        radial-gradient(circle at top, rgba(79, 140, 255, 0.22), transparent 35%),
+        radial-gradient(circle at 20% 20%, rgba(167, 139, 250, 0.18), transparent 28%),
+        linear-gradient(180deg, #07111f 0%, #030712 100%);
+      color: var(--text);
+      min-height: 100vh;
+      min-height: 100dvh;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
     }
     .wrap {
-      max-width: 900px;
+      max-width: 760px;
       margin: 0 auto;
-      padding: 20px;
+      padding: 10px 10px calc(10px + env(safe-area-inset-bottom));
+      box-sizing: border-box;
     }
     .topbar {
       display: flex;
       gap: 10px;
       align-items: center;
-      margin-bottom: 16px;
+      justify-content: space-between;
+      margin-bottom: 10px;
       flex-wrap: wrap;
+      padding: 12px 14px;
+      border-radius: var(--radius-xl);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+    .title {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+    .status {
+      padding: 8px 12px;
+      background: rgba(17, 24, 39, 0.8);
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .top-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: stretch;
     }
     button {
-      background: #2563eb;
+      background: var(--accent-strong);
       color: white;
       border: 0;
-      border-radius: 10px;
-      padding: 10px 14px;
+      border-radius: 14px;
+      padding: 13px 16px;
       cursor: pointer;
-      font-size: 14px;
+      font-size: 15px;
+      font-weight: 600;
+      min-height: 48px;
+      box-shadow: 0 10px 24px rgba(37, 99, 235, 0.24);
     }
     button.secondary {
-      background: #374151;
+      background: rgba(55, 65, 81, 0.92);
+      box-shadow: none;
     }
     button.danger {
-      background: #b91c1c;
+      background: rgba(185, 28, 28, 0.92);
+      box-shadow: none;
     }
     button:disabled {
       opacity: 0.5;
       cursor: not-allowed;
     }
-    .status {
-      padding: 8px 12px;
-      background: #111827;
-      border-radius: 10px;
-      font-size: 14px;
-    }
     .chat {
-      background: #111827;
-      border-radius: 16px;
-      padding: 16px;
-      min-height: 420px;
-      max-height: 65vh;
+      background: var(--panel-strong);
+      border-radius: var(--radius-xl);
+      padding: 14px 12px;
+      min-height: 66vh;
+      max-height: 66vh;
       overflow-y: auto;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06);
+      box-shadow: var(--shadow);
+      border: 1px solid var(--line);
+      scroll-behavior: smooth;
+      -webkit-overflow-scrolling: touch;
     }
     .msg {
       margin-bottom: 12px;
-      padding: 12px 14px;
-      border-radius: 14px;
+      padding: 14px 15px;
+      border-radius: 18px;
       white-space: pre-wrap;
-      line-height: 1.45;
+      line-height: 1.5;
+      font-size: 15px;
+      word-break: break-word;
     }
     .msg.user {
-      background: #1d4ed8;
-      margin-left: 80px;
+      background: linear-gradient(180deg, rgba(37, 99, 235, 0.96), rgba(29, 78, 216, 0.96));
+      margin-left: 18%;
     }
     .msg.assistant {
-      background: #1f2937;
-      margin-right: 80px;
+      background: rgba(31, 41, 55, 0.96);
+      margin-right: 18%;
+      border: 1px solid rgba(255, 255, 255, 0.06);
     }
     .msg.system {
-      background: #3f3f46;
+      background: rgba(63, 63, 70, 0.95);
+      color: #f5f5f5;
     }
     .composer {
-      margin-top: 16px;
+      margin-top: 10px;
       display: grid;
-      gap: 10px;
+      gap: 8px;
+      position: sticky;
+      bottom: 0;
+      padding-bottom: env(safe-area-inset-bottom);
     }
     textarea {
       width: 100%;
-      min-height: 110px;
-      max-height: 220px;
+      min-height: 92px;
+      max-height: 180px;
       resize: vertical;
-      border-radius: 14px;
-      border: 1px solid #374151;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--line);
       padding: 14px;
-      font-size: 15px;
+      font-size: 16px;
       color: #fff;
-      background: #0f172a;
+      background: rgba(15, 23, 42, 0.98);
       box-sizing: border-box;
+      box-shadow: var(--shadow);
+      -webkit-appearance: none;
     }
     .actions {
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
     }
-    .hint {
-      color: #9ca3af;
-      font-size: 13px;
-    }
-    .gate {
-      margin-top: 14px;
-      padding: 12px;
-      border-radius: 12px;
-      background: #3b0764;
-      color: #f5d0fe;
-      display: none;
-    }
-    .small {
-      font-size: 12px;
-      color: #a1a1aa;
+    @media (max-width: 640px) {
+      .wrap {
+        padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+      }
+      .topbar {
+        width: 100%;
+      }
+      .top-actions button {
+        flex: 1 1 calc(50% - 5px);
+      }
+      .chat {
+        min-height: 67vh;
+        max-height: 67vh;
+        padding: 12px 10px;
+      }
+      .msg.user {
+        margin-left: 10%;
+      }
+      .msg.assistant {
+        margin-right: 10%;
+      }
+      textarea {
+        min-height: 88px;
+      }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="topbar">
-      <button id="startBtn">Start chat</button>
-      <button id="confirmBtn" class="secondary" disabled>Confirm</button>
-      <button id="closeBtn" class="danger" disabled>Close chat</button>
+      <div class="title">Jeeves</div>
       <div class="status" id="status">Нет активного чата</div>
+      <div class="top-actions">
+        <button id="startBtn">Start chat</button>
+        <button id="confirmBtn" class="secondary" disabled>Confirm</button>
+        <button id="closeBtn" class="danger" disabled>Close chat</button>
+      </div>
     </div>
 
     <div class="chat" id="chat"></div>
-
-    <div class="gate" id="gateBox">
-      Сейчас агент ждёт review:
-      либо нажми <b>Confirm</b>,
-      либо отправь исправление через <b>Send correction</b>.
-    </div>
 
     <div class="composer">
       <textarea id="input" placeholder="Напиши сообщение..."></textarea>
@@ -151,10 +218,7 @@ CHAT_HTML = """
         <button id="sendBtn" disabled>Send message</button>
         <button id="correctionBtn" class="secondary" disabled>Send correction</button>
       </div>
-      <div class="hint">
-        Обычный flow: Start chat → Send message → Confirm или Send correction.
-      </div>
-      <div class="small" id="meta"></div>
+      <div class="status" id="meta">Обычный flow: Start → Message → Confirm / Correction</div>
     </div>
   </div>
 
@@ -163,7 +227,6 @@ CHAT_HTML = """
     const inputEl = document.getElementById("input");
     const statusEl = document.getElementById("status");
     const metaEl = document.getElementById("meta");
-    const gateBox = document.getElementById("gateBox");
 
     const startBtn = document.getElementById("startBtn");
     const sendBtn = document.getElementById("sendBtn");
@@ -199,12 +262,10 @@ CHAT_HTML = """
       confirmBtn.disabled = !hasChat || !awaitingFeedback || closed;
       closeBtn.disabled = !hasChat || closed;
 
-      gateBox.style.display = awaitingFeedback ? "block" : "none";
-
       metaEl.textContent =
         hasChat
-          ? `chat_id=${chatId} | awaiting_feedback=${awaitingFeedback} | awaiting_confirmation=${awaitingConfirmation} | execution_status=${state?.execution_status ?? "idle"}`
-          : "";
+          ? `chat_id=${chatId} · awaiting_feedback=${awaitingFeedback} · awaiting_confirmation=${awaitingConfirmation} · execution_status=${state?.execution_status ?? "idle"}`
+          : "Обычный flow: Start → Message → Confirm / Correction";
     }
 
     async function api(path, payload) {

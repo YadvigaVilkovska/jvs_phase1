@@ -247,8 +247,12 @@ async def test_explicit_memory_prefix_creates_candidate_not_durable_entry(sessio
 
 def test_memory_candidate_confirm_creates_entry_only_after_confirmation(session: Session):
     mem = MemoryService(session=session)
+    chat = Chat(user_id="u1")
+    session.add(chat)
+    session.commit()
+    session.refresh(chat)
     row = mem.create_explicit_candidate(
-        chat_id="c1",
+        chat_id=chat.id,
         cand=MemoryCandidate(
             memory_type="fact",
             target_layer="long_term_memory",
@@ -264,6 +268,84 @@ def test_memory_candidate_confirm_creates_entry_only_after_confirmation(session:
     entry = mem.confirm_candidate(candidate_id=row.id, user_id="u1")
     assert entry.status == "confirmed"
     assert len(list(session.exec(select(MemoryEntryRow)))) == 1
+
+
+def test_memory_candidate_confirm_rejects_wrong_user(session: Session):
+    mem = MemoryService(session=session)
+    chat = Chat(user_id="u1")
+    session.add(chat)
+    session.commit()
+    session.refresh(chat)
+
+    row = mem.create_explicit_candidate(
+        chat_id=chat.id,
+        cand=MemoryCandidate(
+            memory_type="preference",
+            target_layer="core_profile",
+            normalized_memory="user prefers short answers",
+            source="user_requested",
+            confidence=0.8,
+            requires_confirmation=True,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not belong to this user"):
+        mem.confirm_candidate(candidate_id=row.id, user_id="u2")
+
+
+def test_memory_candidate_confirm_fails_when_candidate_chat_missing(session: Session):
+    mem = MemoryService(session=session)
+
+    row = mem.create_explicit_candidate(
+        chat_id="missing-chat-id",
+        cand=MemoryCandidate(
+            memory_type="preference",
+            target_layer="core_profile",
+            normalized_memory="user prefers short answers",
+            source="user_requested",
+            confidence=0.8,
+            requires_confirmation=True,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="candidate chat not found"):
+        mem.confirm_candidate(candidate_id=row.id, user_id="u1")
+
+
+def test_pending_memory_dedup_respects_semantic_identity(session: Session):
+    mem = MemoryService(session=session)
+    chat = Chat(user_id="u1")
+    session.add(chat)
+    session.commit()
+    session.refresh(chat)
+
+    mem.create_explicit_candidate(
+        chat_id=chat.id,
+        cand=MemoryCandidate(
+            memory_type="preference",
+            target_layer="core_profile",
+            normalized_memory="user prefers short answers",
+            source="user_requested",
+            confidence=0.9,
+            requires_confirmation=True,
+        ),
+    )
+
+    repo = mem.repo
+    assert repo.has_pending_equivalent_normalized_memory(
+        chat_id=chat.id,
+        normalized_memory="user prefers short answers",
+        memory_type="preference",
+        target_layer="core_profile",
+        source="user_requested",
+    )
+    assert not repo.has_pending_equivalent_normalized_memory(
+        chat_id=chat.id,
+        normalized_memory="user prefers short answers",
+        memory_type="rule",
+        target_layer="core_profile",
+        source="user_requested",
+    )
 
 
 @pytest.mark.asyncio
@@ -382,4 +464,3 @@ async def test_confirm_does_not_duplicate_normalized_requests(session: Session):
         session.exec(select(NormalizedRequestRow).where(NormalizedRequestRow.chat_id == state0.chat_id))
     )
     assert len(after2) == 1
-

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlmodel import Session, select
 
@@ -44,7 +44,7 @@ class ProfileRepository:
             row = existing[0]
             row.value_json = json.dumps(value, ensure_ascii=False)
             row.source = source
-            row.updated_at = datetime.utcnow()
+            row.updated_at = datetime.now(timezone.utc)
         else:
             row = CoreProfileEntryRow(
                 user_id=user_id,
@@ -57,4 +57,3 @@ class ProfileRepository:
         self.session.commit()
         self.session.refresh(row)
         return row
-
