@@ -26,6 +26,8 @@ class ChatState(BaseModel):
     normalized_request_history: List[NormalizedUserRequest] = Field(default_factory=list)
     awaiting_user_feedback: bool = False
     awaiting_confirmation: bool = False
+    # Set only by ChatOrchestrator for explicit /chat/confirm or /chat/correction (never from free text / LLM).
+    explicit_normalized_review_action: None | Literal["confirm", "correction"] = None
     execution_decision: Optional[ExecutionDecision] = None
     execution_status: Literal["idle", "pending", "running", "completed", "blocked"] = "idle"
     assistant_messages: List[str] = Field(default_factory=list)

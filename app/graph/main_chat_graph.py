@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from langgraph.graph import END, StateGraph
 from pydantic import ValidationError
 
-from app.agents.intent_agent import IntentAgent
 from app.agents.execution_agent import ExecutionAgent
 from app.agents.memory_agent import MemoryAgent
 from app.agents.normalization_agent import NormalizationAgent
@@ -22,7 +21,6 @@ class MainChatGraphDeps:
     chat_repo: ChatRepository
     normalization_agent: NormalizationAgent
     execution_agent: ExecutionAgent
-    intent_agent: IntentAgent
     memory_agent: MemoryAgent | None = None
     communication_rule_service: CommunicationRuleService | None = None
     execution_service: ExecutionService | None = None
@@ -62,10 +60,46 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
         if state.chat_closed:
             state.assistant_messages.append("Chat is closed.")
             return state
-        if not state.raw_user_message:
+
+        explicit = state.explicit_normalized_review_action
+        if explicit == "confirm":
+            # Set only by POST /chat/confirm; never from free text / turn_intent.
+            state.explicit_memory_command = False
+            state.awaiting_confirmation = True
+            state.awaiting_user_feedback = False
+            if state.turn_intent is None:
+                raise ValueError("turn_intent must be set by ChatOrchestrator (placeholder allowed)")
             return state
 
-        # Persist the message first.
+        if explicit == "correction":
+            if not (state.raw_user_message or "").strip():
+                return state
+            deps.chat_repo.add_message(state.chat_id, "user", state.raw_user_message)
+            if deps.communication_rule_service is not None:
+                state.communication_rule_context = deps.communication_rule_service.build_prompt_context(
+                    user_id=state.user_id,
+                    chat_id=state.chat_id,
+                )
+                await deps.communication_rule_service.ingest_explicit_request(
+                    user_id=state.user_id,
+                    chat_id=state.chat_id,
+                    raw_user_message=state.raw_user_message,
+                )
+                state.communication_rule_context = deps.communication_rule_service.build_prompt_context(
+                    user_id=state.user_id,
+                    chat_id=state.chat_id,
+                )
+            state.explicit_memory_command = False
+            state.awaiting_confirmation = False
+            if state.turn_intent is None:
+                raise ValueError("turn_intent must be set by ChatOrchestrator (placeholder allowed)")
+            return state
+
+        if not state.raw_user_message:
+            return state
+        if state.turn_intent is None:
+            raise ValueError("turn_intent must be precomputed by ChatOrchestrator")
+
         deps.chat_repo.add_message(state.chat_id, "user", state.raw_user_message)
 
         if deps.communication_rule_service is not None:
@@ -84,40 +118,53 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
                 chat_id=state.chat_id,
             )
 
-        # LLM-first routing of the user's intent for this turn (can be precomputed by ChatService).
-        if state.turn_intent is None:
-            ctx = {
-                "chat_id": state.chat_id,
-                "user_id": state.user_id,
-                "chat_closed": state.chat_closed,
-                "awaiting_user_feedback": state.awaiting_user_feedback,
-                "awaiting_confirmation": state.awaiting_confirmation,
-                "has_normalized_request": state.normalized_request is not None,
-                "normalized_request_json": state.normalized_request.model_dump() if state.normalized_request else None,
-                "communication_rule_context": state.communication_rule_context,
-                "pending_memory_candidates": [
-                    {"normalized_memory": c.normalized_memory, "requires_confirmation": c.requires_confirmation}
-                    for c in (state.memory_candidates or [])
-                ],
-            }
-            intent = await deps.intent_agent.classify(raw_user_message=state.raw_user_message, context=ctx)
-            state.turn_intent = intent
+        state.explicit_memory_command = state.turn_intent.kind == "memory_store"
+        if state.turn_intent.kind == "new_task":
+            state.awaiting_confirmation = False
+            state.awaiting_user_feedback = False
+        return state
 
-        # Memory store is routed ONLY by LLM intent (no prefix heuristics).
-        state.explicit_memory_command = bool(state.turn_intent is not None and state.turn_intent.kind == "memory_store")
+    async def handle_rule_feedback(state: ChatState) -> ChatState:
+        if deps.communication_rule_service is None:
+            return state
 
-        # IMPORTANT: state mutations must happen in nodes, not in conditional edge functions.
-        # Otherwise LangGraph may not persist them.
-        if state.turn_intent is not None:
-            if state.turn_intent.kind == "confirm":
-                state.awaiting_confirmation = True
-                state.awaiting_user_feedback = False
-            elif state.turn_intent.kind == "correction":
-                state.awaiting_confirmation = False
-            elif state.turn_intent.kind == "new_task":
-                # Treat as a fresh request; clear any feedback gate from previous draft.
-                state.awaiting_confirmation = False
-                state.awaiting_user_feedback = False
+        kind = state.turn_intent.kind
+        rule_key = state.turn_intent.communication_rule_key or "brevity"
+        if kind == "rule_confirm":
+            updated = deps.communication_rule_service.register_confirmation(
+                user_id=state.user_id,
+                chat_id=state.chat_id,
+                rule_key=rule_key,
+            )
+        elif kind == "rule_positive_feedback":
+            updated = deps.communication_rule_service.register_positive_feedback_after_apply(
+                user_id=state.user_id,
+                chat_id=state.chat_id,
+                rule_key=rule_key,
+            )
+        elif kind == "rule_negative_correction":
+            updated = deps.communication_rule_service.register_negative_correction(
+                user_id=state.user_id,
+                chat_id=state.chat_id,
+                rule_key=rule_key,
+            )
+        elif kind == "rule_revoke":
+            updated = deps.communication_rule_service.register_revoke(
+                user_id=state.user_id,
+                chat_id=state.chat_id,
+                rule_key=rule_key,
+            )
+        else:
+            return state
+
+        state.communication_rule_context = deps.communication_rule_service.build_prompt_context(
+            user_id=state.user_id,
+            chat_id=state.chat_id,
+        )
+        if updated is not None:
+            note = f"Communication rule updated: `{updated.rule_key}` -> `{updated.status}` (score={updated.score:.2f})."
+            deps.chat_repo.add_message(state.chat_id, "assistant", note)
+            state.assistant_messages.append(note)
         return state
 
     async def normalize_user_request(state: ChatState) -> ChatState:
@@ -154,12 +201,9 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
             return state
         if state.normalized_request is None:
             return state
+        state.explicit_normalized_review_action = None
 
-        corr_text = (
-            state.turn_intent.correction_text
-            if state.turn_intent is not None and state.turn_intent.kind == "correction"
-            else state.raw_user_message
-        )
+        corr_text = (state.raw_user_message or "").strip()
         corrected = await deps.normalization_agent.apply_correction(
             correction_message=corr_text,
             previous=state.normalized_request,
@@ -225,7 +269,7 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
             f"`{candidate.normalized_memory}`\n"
             f"Target layer: `{candidate.target_layer}`\n"
             f"Candidate id: `{row.id}`\n"
-            "Confirm or reject by sending a normal chat message (no buttons)."
+            "Confirm or reject using deterministic memory candidate actions (no free-text approvals)."
         )
         deps.chat_repo.add_message(state.chat_id, "assistant", msg)
         state.assistant_messages.append(msg)
@@ -272,6 +316,7 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
     async def confirm_normalized_request(state: ChatState) -> ChatState:
         if not state.awaiting_confirmation:
             return state
+        state.explicit_normalized_review_action = None
 
         # Persist status and proceed to decision.
         deps.chat_repo.set_chat_status(state.chat_id, "awaiting_confirmation")
@@ -326,12 +371,9 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
             state.assistant_messages.append(msg)
         return state
 
-    async def close_chat(state: ChatState) -> ChatState:
-        # For v1 we keep chat open unless explicitly closed by separate endpoint (not in spec).
-        return state
-
     builder = StateGraph(ChatState)
     builder.add_node("receive_user_message", receive_user_message)
+    builder.add_node("handle_rule_feedback", handle_rule_feedback)
     builder.add_node("normalize_user_request", normalize_user_request)
     builder.add_node("apply_user_correction", apply_user_correction)
     builder.add_node("show_normalized_request", show_normalized_request)
@@ -340,23 +382,27 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
     builder.add_node("confirm_normalized_request", confirm_normalized_request)
     builder.add_node("decide_execution", decide_execution)
     builder.add_node("execute_task", execute_task)
-    builder.add_node("close_chat", close_chat)
-
     builder.set_entry_point("receive_user_message")
 
     def _after_receive(state: ChatState) -> str:
-        intent_kind = state.turn_intent.kind if state.turn_intent is not None else None
-        if intent_kind == "confirm":
+        # confirm/correction of normalized requests use explicit_normalized_review_action from
+        # POST /chat/confirm and POST /chat/correction, not turn_intent kinds.
+        if state.explicit_normalized_review_action == "confirm":
             return "confirm_normalized_request"
+        if state.explicit_normalized_review_action == "correction":
+            return "apply_user_correction"
+        if state.turn_intent is None:
+            raise ValueError("turn_intent must be precomputed by ChatOrchestrator")
+        intent_kind = state.turn_intent.kind
+        if intent_kind in {"rule_confirm", "rule_positive_feedback", "rule_negative_correction", "rule_revoke"}:
+            return "handle_rule_feedback"
         if intent_kind == "memory_store":
             return "handle_memory_command"
-        if intent_kind == "correction":
-            return "apply_user_correction"
-        # Default: treat as a new task (including when user asks a different question mid-review).
         return "normalize_user_request"
 
     builder.add_conditional_edges("receive_user_message", _after_receive)
 
+    builder.add_edge("handle_rule_feedback", END)
     builder.add_edge("normalize_user_request", "show_normalized_request")
     builder.add_edge("apply_user_correction", "show_normalized_request")
     builder.add_edge("handle_memory_command", "wait_for_user_feedback")
@@ -377,7 +423,6 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
         return END
 
     builder.add_conditional_edges("decide_execution", _after_decide)
-    builder.add_edge("execute_task", "close_chat")
-    builder.add_edge("close_chat", END)
+    builder.add_edge("execute_task", END)
 
     return builder.compile()

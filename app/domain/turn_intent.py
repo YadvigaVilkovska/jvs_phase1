@@ -9,6 +9,10 @@ TurnIntentKind = Literal[
     "new_task",
     "confirm",
     "correction",
+    "rule_confirm",
+    "rule_positive_feedback",
+    "rule_negative_correction",
+    "rule_revoke",
     "start_chat",
     "close_chat",
     "memory_store",
@@ -32,8 +36,8 @@ class TurnIntent(BaseModel):
     memory_candidate_id: Optional[str] = None
     memory_text: Optional[str] = None
     correction_text: Optional[str] = None
+    communication_rule_key: Optional[str] = None
 
     # Optional introspection (not necessarily shown to the user).
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = ""
-

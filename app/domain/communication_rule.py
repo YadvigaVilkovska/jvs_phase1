@@ -8,12 +8,17 @@ from pydantic import BaseModel, Field
 CommunicationRuleScope = Literal["global", "current_chat", "topic"]
 CommunicationRuleStatus = Literal["candidate", "soft_active", "active", "rejected", "revoked"]
 CommunicationRuleEvidenceType = Literal[
-    "explicit_request",
+    "initial_explicit_request",
     "repeat_request",
     "explicit_confirmation",
+    "positive_feedback_after_apply",
+    "negative_correction",
+    "explicit_revoke",
+    "stability_bonus",
+    # Backward-compatible aliases used by older tests/flows.
     "positive_feedback",
     "negative_feedback",
-    "explicit_revoke",
+    "explicit_request",
 ]
 
 

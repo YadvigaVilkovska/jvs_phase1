@@ -11,6 +11,7 @@ from app.agents.memory_agent import MemoryAgent
 from app.agents.normalization_agent import NormalizationAgent
 from app.domain.chat_state import ChatState
 from app.domain.normalized_user_request import NormalizedUserRequest
+from app.domain.turn_intent import TurnIntent
 from app.graph.graph_factory import GraphFactory
 from app.repositories.chat_repository import ChatRepository
 from app.repositories.communication_rule_repository import CommunicationRuleRepository
@@ -37,6 +38,10 @@ def _row_to_normalized_request(row) -> NormalizedUserRequest:
         ambiguity_handling=row.ambiguity_handling,
         revision=row.revision,
     )
+
+
+class CriticalTurnError(ValueError):
+    """Raised when /chat/turn is used during a fixed-choice review state."""
 
 
 class ChatOrchestrator:
@@ -75,7 +80,6 @@ class ChatOrchestrator:
             chat_repo=self.chat_repo,
             normalization_agent=self.normalization_agent,
             execution_agent=self.execution_agent,
-            intent_agent=self.intent_agent,
             memory_agent=self.memory_agent,
             communication_rule_service=self.communication_rule_service,
             execution_service=self.execution_service,
@@ -102,6 +106,7 @@ class ChatOrchestrator:
             normalized_request_history=history,
             awaiting_user_feedback=awaiting_feedback,
             awaiting_confirmation=awaiting_confirmation,
+            explicit_normalized_review_action=None,
             execution_decision=None,
             execution_status="idle",
             assistant_messages=[],
@@ -119,6 +124,52 @@ class ChatOrchestrator:
         chat = self.chat_repo.create_chat(user_id)
         return ChatState(chat_id=chat.id, user_id=user_id)
 
+    def _latest_rule_key_for_chat(self, *, user_id: str, chat_id: str) -> str | None:
+        applicable = self.communication_rule_service.get_applicable_rules(user_id=user_id, chat_id=chat_id)
+        for group in ("active_rules", "soft_rules", "candidate_rules"):
+            rules = applicable.get(group) or []
+            if rules:
+                return rules[0].rule_key
+        return None
+
+    def _normalize_turn_text(self, text: str) -> str:
+        return " ".join((text or "").strip().lower().split())
+
+    def _resolve_communication_rule_turn_intent(self, *, user_message: str, latest_rule_key: str | None) -> TurnIntent | None:
+        if latest_rule_key is None:
+            return None
+
+        normalized = self._normalize_turn_text(user_message)
+        if normalized in {"да", "да, именно так", "верно", "подтверждаю", "оставь так", "подтверждаю правило"}:
+            return TurnIntent(
+                kind="rule_confirm",
+                communication_rule_key=latest_rule_key,
+                confidence=1.0,
+                reason="deterministic communication rule confirm",
+            )
+        if normalized in {"да, так лучше", "так лучше", "better", "works better", "ok, keep it"}:
+            return TurnIntent(
+                kind="rule_positive_feedback",
+                communication_rule_key=latest_rule_key,
+                confidence=1.0,
+                reason="deterministic communication rule positive feedback",
+            )
+        if normalized in {"без воды", "короче", "shorter", "less detail"}:
+            return TurnIntent(
+                kind="rule_negative_correction",
+                communication_rule_key=latest_rule_key,
+                confidence=1.0,
+                reason="deterministic communication rule negative correction",
+            )
+        if normalized in {"не надо", "нет, уже не надо", "отмени это правило", "уже не нужно", "можно как раньше"}:
+            return TurnIntent(
+                kind="rule_revoke",
+                communication_rule_key=latest_rule_key,
+                confidence=1.0,
+                reason="deterministic communication rule revoke",
+            )
+        return None
+
     async def post_turn(
         self,
         *,
@@ -129,77 +180,104 @@ class ChatOrchestrator:
         if chat_id:
             return chat_id, await self.post_user_message(chat_id=chat_id, user_message=user_message)
 
-        await self.intent_agent.classify(
-            raw_user_message=user_message,
-            context={
-                "chat_exists": False,
-                "chat_closed": False,
-                "awaiting_user_feedback": False,
-                "awaiting_confirmation": False,
-                "pending_memory_candidates": [],
-                "latest_normalized_request_summary": None,
-            },
-        )
         created = self.start_chat(user_id=user_id)
         return created.chat_id, await self.post_user_message(chat_id=created.chat_id, user_message=user_message)
 
     async def post_user_message(self, *, chat_id: str, user_message: str) -> ChatTurnResult:
         state = self._load_state(chat_id)
         state.raw_user_message = user_message
-
+        if state.awaiting_user_feedback:
+            raise ValueError("review_pending_use_confirm_or_reject")
         mem_svc = MemoryService(session=self.session)
         pending = mem_svc.list_candidates(chat_id=chat_id)
-        state.turn_intent = await self.intent_agent.classify(
-            raw_user_message=user_message,
-            context={
-                "chat_id": state.chat_id,
-                "user_id": state.user_id,
-                "chat_closed": state.chat_closed,
-                "awaiting_user_feedback": state.awaiting_user_feedback,
-                "awaiting_confirmation": state.awaiting_confirmation,
-                "has_normalized_request": state.normalized_request is not None,
-                "normalized_request_json": state.normalized_request.model_dump() if state.normalized_request else None,
-                "communication_rule_context": state.communication_rule_context,
-                "pending_memory_candidates": [
-                    {
-                        "id": r.id,
-                        "normalized_memory": r.normalized_memory,
-                        "memory_type": r.memory_type,
-                        "target_layer": r.target_layer,
-                        "status": r.status,
-                    }
-                    for r in pending
-                ],
-            },
-        )
+        if pending:
+            raise CriticalTurnError("memory candidate review requires explicit confirm/reject actions")
 
-        if state.turn_intent.kind == "close_chat":
-            return await self.close(chat_id=chat_id)
-        if state.turn_intent.kind in {"memory_confirm", "memory_reject"}:
-            cid = (state.turn_intent.memory_candidate_id or "").strip()
-            if not cid:
-                state.assistant_messages.append("Please specify the memory candidate id to confirm/reject.")
-                return ChatTurnResult(state=state)
-            try:
-                if state.turn_intent.kind == "memory_confirm":
-                    mem_svc.confirm_candidate(candidate_id=cid, user_id=state.user_id)
-                    state.assistant_messages.append(f"Memory candidate confirmed: `{cid}`")
-                else:
-                    mem_svc.reject_candidate(candidate_id=cid)
-                    state.assistant_messages.append(f"Memory candidate rejected: `{cid}`")
-            except ValueError as e:
-                state.assistant_messages.append(str(e))
-            return ChatTurnResult(state=state)
+        latest_rule_key = None
+        if self.communication_rule_service is not None:
+            latest_rule_key = self._latest_rule_key_for_chat(user_id=state.user_id, chat_id=chat_id)
+        rule_intent = self._resolve_communication_rule_turn_intent(user_message=user_message, latest_rule_key=latest_rule_key)
+        if rule_intent is not None:
+            state.turn_intent = rule_intent
 
+        if state.turn_intent is None:
+            state.turn_intent = await self.intent_agent.classify(
+                raw_user_message=user_message,
+                context={
+                    "chat_id": state.chat_id,
+                    "user_id": state.user_id,
+                    "chat_closed": state.chat_closed,
+                    "awaiting_user_feedback": state.awaiting_user_feedback,
+                    "awaiting_confirmation": state.awaiting_confirmation,
+                    "has_normalized_request": state.normalized_request is not None,
+                    "normalized_request_json": state.normalized_request.model_dump() if state.normalized_request else None,
+                    "communication_rule_context": state.communication_rule_context,
+                    "pending_memory_candidates": [
+                        {
+                            "id": r.id,
+                            "normalized_memory": r.normalized_memory,
+                            "memory_type": r.memory_type,
+                            "target_layer": r.target_layer,
+                            "status": r.status,
+                        }
+                        for r in pending
+                    ],
+                },
+            )
         out = await self.graphs.main_chat_graph().ainvoke(state)
         return ChatTurnResult(state=ChatState.model_validate(out))
 
+    async def reject_review(self, *, chat_id: str) -> ChatTurnResult:
+        state = self._load_state(chat_id)
+        if not state.awaiting_user_feedback:
+            raise ValueError("chat is not awaiting review")
+        chat = self.chat_repo.get_chat(chat_id)
+        if not chat:
+            raise ValueError("chat not found")
+        # Only normalized request review; memory review uses memory endpoints, not this path.
+        if chat.status != "awaiting_feedback" or state.normalized_request is None:
+            raise ValueError("chat is not awaiting review")
+        state.awaiting_user_feedback = False
+        state.awaiting_confirmation = False
+        state.execution_status = "idle"
+        state.assistant_messages.append("Запрос не подтверждён. Сформулируйте новый запрос заново.")
+        chat.status = "active"
+        self.session.add(chat)
+        self.session.commit()
+        return ChatTurnResult(state=state)
+
     async def post_correction(self, *, chat_id: str, correction_message: str) -> ChatTurnResult:
-        return await self.post_user_message(chat_id=chat_id, user_message=correction_message)
+        state = self._load_state(chat_id)
+        chat_row = self.chat_repo.get_chat(chat_id)
+        if chat_row is None:
+            raise ValueError("chat not found")
+        if state.chat_closed:
+            raise ValueError("chat is closed")
+        if chat_row.status != "awaiting_feedback" or state.normalized_request is None:
+            raise CriticalTurnError("POST /chat/correction is only valid during normalized request review")
+        state.raw_user_message = correction_message
+        state.explicit_normalized_review_action = "correction"
+        state.turn_intent = TurnIntent(kind="other", confidence=1.0, reason="orchestrator placeholder (review via explicit action)")
+        out = await self.graphs.main_chat_graph().ainvoke(state)
+        return ChatTurnResult(state=ChatState.model_validate(out))
 
     async def confirm(self, *, chat_id: str) -> ChatTurnResult:
         state = self._load_state(chat_id)
-        state.awaiting_confirmation = True
+        chat_row = self.chat_repo.get_chat(chat_id)
+        if chat_row is None:
+            raise ValueError("chat not found")
+        if state.chat_closed:
+            raise ValueError("chat is closed")
+        if state.normalized_request is None:
+            raise ValueError("POST /chat/confirm requires a normalized request")
+        # Idempotent: a completed confirm already advanced status past review.
+        if chat_row.status == "awaiting_confirmation":
+            return ChatTurnResult(state=state)
+        if chat_row.status != "awaiting_feedback":
+            raise ValueError("POST /chat/confirm is only valid during normalized request review")
+        state.raw_user_message = None
+        state.explicit_normalized_review_action = "confirm"
+        state.turn_intent = TurnIntent(kind="other", confidence=1.0, reason="orchestrator placeholder (review via explicit action)")
         out = await self.graphs.main_chat_graph().ainvoke(state)
         return ChatTurnResult(state=ChatState.model_validate(out))
 

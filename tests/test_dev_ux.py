@@ -68,6 +68,11 @@ def test_chat_turn_creates_chat_without_chat_id(api_client: TestClient):
     assert r.status_code == 503
 
 
+def test_reject_review_returns_404_or_409_when_not_in_review(api_client: TestClient):
+    r = api_client.post("/chat/reject_review", json={"chat_id": "missing-or-invalid"})
+    assert r.status_code in (404, 409)
+
+
 def test_dev_demo_flow_without_stub_returns_503(monkeypatch, tmp_path):
     db = tmp_path / "no_stub.db"
     monkeypatch.setattr(settings, "database_url", f"sqlite:///{db}")

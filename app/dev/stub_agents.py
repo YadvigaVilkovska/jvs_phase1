@@ -66,11 +66,8 @@ class FakeIntentAgent:
                     payload = payload[len(prefix) :].strip(" :—-")
             return TurnIntent(kind="memory_store", memory_text=payload, confidence=0.9, reason="fake memory_store")
 
-        if awaiting_feedback and has_norm and text in {"confirm", "confirmed", "yes", "ok", "okay", "да", "подтверждаю", "верно"}:
-            return TurnIntent(kind="confirm", confidence=0.9, reason="fake confirm")
-
         if awaiting_feedback and has_norm:
-            return TurnIntent(kind="correction", correction_text=raw_user_message, confidence=0.7, reason="fake correction")
+            return TurnIntent(kind="other", confidence=0.5, reason="review must use explicit confirm/reject endpoints")
 
         return TurnIntent(kind="new_task", confidence=0.7, reason="fake new_task")
 

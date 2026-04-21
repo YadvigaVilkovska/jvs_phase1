@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from app.agents.intent_agent import IntentAgent
 from app.agents.execution_agent import ExecutionAgent
 from app.agents.memory_agent import MemoryAgent
 from app.agents.normalization_agent import NormalizationAgent
@@ -20,7 +19,6 @@ class GraphFactory:
         chat_repo: ChatRepository,
         normalization_agent: NormalizationAgent,
         execution_agent: ExecutionAgent,
-        intent_agent: IntentAgent,
         memory_repo: MemoryRepository | None = None,
         communication_rule_repo: CommunicationRuleRepository | None = None,
         memory_agent: MemoryAgent | None = None,
@@ -30,7 +28,6 @@ class GraphFactory:
         self.chat_repo = chat_repo
         self.normalization_agent = normalization_agent
         self.execution_agent = execution_agent
-        self.intent_agent = intent_agent
         self.memory_repo = memory_repo
         self.communication_rule_repo = communication_rule_repo
         self.memory_agent = memory_agent or MemoryAgent()
@@ -47,7 +44,6 @@ class GraphFactory:
                 chat_repo=self.chat_repo,
                 normalization_agent=self.normalization_agent,
                 execution_agent=self.execution_agent,
-                intent_agent=self.intent_agent,
                 memory_agent=self.memory_agent,
                 communication_rule_service=self.communication_rule_service,
                 execution_service=self.execution_service,

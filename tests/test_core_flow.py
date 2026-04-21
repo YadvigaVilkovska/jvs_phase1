@@ -6,6 +6,7 @@ from sqlmodel import select
 
 from app.domain.execution_decision import ExecutionDecision
 from app.domain.communication_rule import CommunicationRuleCandidate, CommunicationRuleState
+from app.domain.chat_state import ChatState
 from app.domain.memory_candidate import MemoryCandidate
 from app.domain.normalized_user_request import NormalizedUserRequest
 from app.repositories.communication_rule_repository import CommunicationRuleRepository
@@ -20,6 +21,7 @@ from app.repositories.models import (
 )
 from app.settings import settings
 from app.services.communication_rule_service import CommunicationRuleService
+from app.services.chat_orchestrator import CriticalTurnError
 from app.services.memory_service import MemoryService
 from app.services.chat_service import ChatService
 from app.agents.normalization_agent import NormalizationAgent
@@ -273,6 +275,228 @@ async def test_communication_rule_service_conflicting_current_chat_rule_override
     assert current_chat_brevity.score == pytest.approx(0.2)
 
 
+@pytest.mark.asyncio
+async def test_chat_first_communication_rule_lifecycle_through_ordinary_messages(session: Session):
+    crs = CommunicationRuleService(
+        repository=CommunicationRuleRepository(session),
+        agent=FakeCommunicationRuleAgent(),
+    )
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+        communication_rule_service=crs,
+    )
+    state0 = svc.start_chat(user_id="u1")
+
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Отвечай короче.")
+    await svc.confirm(chat_id=state0.chat_id)
+    row1 = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row1 is not None
+    assert row1.status == "candidate"
+    assert row1.score == pytest.approx(0.2)
+
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Пиши кратко.")
+    await svc.confirm(chat_id=state0.chat_id)
+    row2 = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row2 is not None
+    assert row2.score >= 0.4
+
+    await svc.confirm(chat_id=state0.chat_id)
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Подтверждаю правило")
+    row3 = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row3 is not None
+    assert row3.status == "active"
+    assert row3.score >= 0.7
+
+    await svc.confirm(chat_id=state0.chat_id)
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Да, так лучше")
+    row4 = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row4 is not None
+    row4_score = row4.score
+    assert row4_score > 0.7
+
+    await svc.confirm(chat_id=state0.chat_id)
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Без воды")
+    row5 = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row5 is not None
+    assert row5.status in {"candidate", "soft_active"}
+    assert row5.score < row4_score
+
+    await svc.confirm(chat_id=state0.chat_id)
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Нет, уже не надо")
+    row6 = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row6 is not None
+    assert row6.status == "revoked"
+    assert row6.score == pytest.approx(0.0)
+    assert "Отвечай кратко." not in crs.build_prompt_context(user_id="u1", chat_id=state0.chat_id)
+
+
+@pytest.mark.asyncio
+async def test_repeat_request_via_post_user_message_increases_score(session: Session):
+    crs = CommunicationRuleService(
+        repository=CommunicationRuleRepository(session),
+        agent=FakeCommunicationRuleAgent(),
+    )
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+        communication_rule_service=crs,
+    )
+    state0 = svc.start_chat(user_id="u1")
+
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Отвечай короче.")
+    await svc.confirm(chat_id=state0.chat_id)
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Пиши кратко.")
+
+    row = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row is not None
+    assert row.score >= 0.4
+    assert row.status == "soft_active"
+
+
+@pytest.mark.asyncio
+async def test_chat_flow_repeat_updates_existing_communication_rule(session: Session):
+    crs = CommunicationRuleService(
+        repository=CommunicationRuleRepository(session),
+        agent=FakeCommunicationRuleAgent(),
+    )
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+        communication_rule_service=crs,
+    )
+    state0 = svc.start_chat(user_id="u1")
+
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Отвечай короче.")
+    await svc.confirm(chat_id=state0.chat_id)
+    row1 = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row1 is not None
+    row1_score = row1.score
+
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Пиши кратко.")
+    row2 = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row2 is not None
+    assert row2.id == row1.id
+    assert row2.score > row1_score
+
+
+@pytest.mark.asyncio
+async def test_chat_flow_confirm_updates_existing_communication_rule(session: Session):
+    crs = CommunicationRuleService(
+        repository=CommunicationRuleRepository(session),
+        agent=FakeCommunicationRuleAgent(),
+    )
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+        communication_rule_service=crs,
+    )
+    state0 = svc.start_chat(user_id="u1")
+
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Отвечай короче.")
+    await svc.confirm(chat_id=state0.chat_id)
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Пиши кратко.")
+    await svc.confirm(chat_id=state0.chat_id)
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Да")
+
+    row = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row is not None
+    assert row.score >= 0.7
+    assert row.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_chat_flow_revoke_revokes_existing_communication_rule(session: Session):
+    crs = CommunicationRuleService(
+        repository=CommunicationRuleRepository(session),
+        agent=FakeCommunicationRuleAgent(),
+    )
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+        communication_rule_service=crs,
+    )
+    state0 = svc.start_chat(user_id="u1")
+
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Отвечай короче.")
+    await svc.confirm(chat_id=state0.chat_id)
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Пиши кратко.")
+    await svc.confirm(chat_id=state0.chat_id)
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Да")
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Не надо")
+
+    row = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row is not None
+    assert row.status == "revoked"
+    assert row.score == pytest.approx(0.0)
+    assert "Отвечай кратко." not in crs.build_prompt_context(user_id="u1", chat_id=state0.chat_id)
+
+
+@pytest.mark.asyncio
+async def test_chat_flow_repeat_does_not_create_duplicate_rule_state(session: Session):
+    crs = CommunicationRuleService(
+        repository=CommunicationRuleRepository(session),
+        agent=FakeCommunicationRuleAgent(),
+    )
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+        communication_rule_service=crs,
+    )
+    state0 = svc.start_chat(user_id="u1")
+
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Отвечай короче.")
+    await svc.confirm(chat_id=state0.chat_id)
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="Пиши кратко.")
+
+    rows = list(
+        session.exec(
+            select(CommunicationRuleStateRow).where(CommunicationRuleStateRow.user_id == "u1")
+        )
+    )
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_flow_confirm_without_rule_state_does_nothing(session: Session):
+    crs = CommunicationRuleService(
+        repository=CommunicationRuleRepository(session),
+        agent=FakeCommunicationRuleAgent(),
+    )
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+        communication_rule_service=crs,
+    )
+    state0 = svc.start_chat(user_id="u1")
+
+    out1 = await svc.post_user_message(chat_id=state0.chat_id, user_message="Да")
+    row_after_confirm = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row_after_confirm is None
+
+    with pytest.raises(ValueError, match="review_pending_use_confirm_or_reject"):
+        await svc.post_user_message(chat_id=state0.chat_id, user_message="Не надо")
+    row_after_revoke = crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id)
+    assert row_after_revoke is None
+
+    assert out1.state.chat_id == state0.chat_id
+    assert crs.repository.get_state("u1", "brevity", "current_chat", chat_id=state0.chat_id) is None
+
+
 def test_repeated_upsert_of_same_global_identity_does_not_create_second_row(session: Session):
     repo = CommunicationRuleRepository(session)
     first = repo.upsert_state(
@@ -453,6 +677,7 @@ async def test_next_turn_reuses_active_communication_rules(session: Session):
 
     turn1 = await svc.post_user_message(chat_id=state0.chat_id, user_message="Отвечай короче.")
     assert turn1.state.communication_rule_context == ""
+    await svc.confirm(chat_id=state0.chat_id)
 
     await svc.communication_rule_service.register_repeated_instruction(
         user_id="u1",
@@ -697,7 +922,7 @@ async def test_correction_creates_new_revision_same_object_contract(session: Ses
     assert turn1.state.normalized_request is not None
     assert turn1.state.normalized_request.revision == 1
 
-    turn2 = await svc.post_user_message(chat_id=state0.chat_id, user_message="change it")
+    turn2 = await svc.post_correction(chat_id=state0.chat_id, correction_message="change it")
     assert turn2.state.normalized_request is not None
     assert turn2.state.normalized_request.revision == 2
     assert len(turn2.state.normalized_request_history) >= 2
@@ -841,6 +1066,21 @@ class _FixedIntentAgent:
         return self._intent
 
 
+class _RecordingIntentAgent:
+    def __init__(self, intent: TurnIntent):
+        self._intent = intent
+        self.calls: list[tuple[str, dict]] = []
+
+    async def classify(self, *, raw_user_message: str, context: dict) -> TurnIntent:
+        self.calls.append((raw_user_message, context))
+        return self._intent
+
+
+class _FailingIntentAgent:
+    async def classify(self, *, raw_user_message: str, context: dict) -> TurnIntent:
+        raise AssertionError("graph must not re-classify intent")
+
+
 class _RecordingMemoryAgent:
     def __init__(self):
         self.seen_correction_message = None
@@ -851,10 +1091,10 @@ class _RecordingMemoryAgent:
 
 
 @pytest.mark.asyncio
-async def test_chat_message_can_close_chat_via_intent(session: Session, monkeypatch):
+async def test_chat_message_close_is_not_text_routed(session: Session, monkeypatch):
     svc = ChatService(
         session=session,
-        intent_agent=_FixedIntentAgent(TurnIntent(kind="close_chat", confidence=1.0, reason="test")),
+        intent_agent=_FixedIntentAgent(TurnIntent(kind="new_task", confidence=1.0, reason="test")),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
@@ -865,7 +1105,382 @@ async def test_chat_message_can_close_chat_via_intent(session: Session, monkeypa
 
     monkeypatch.setattr("app.services.chat_service.run_post_chat_analysis", _noop_post_chat)
     out = await svc.post_user_message(chat_id=state0.chat_id, user_message="close the chat please")
-    assert out.state.chat_closed is True
+    assert out.state.chat_closed is False
+    closed = await svc.close(chat_id=state0.chat_id)
+    assert closed.state.chat_closed is True
+
+
+@pytest.mark.asyncio
+async def test_one_turn_classifies_intent_exactly_once_for_new_chat(session: Session):
+    intent_agent = _RecordingIntentAgent(TurnIntent(kind="new_task", confidence=1.0, reason="test"))
+    svc = ChatService(
+        session=session,
+        intent_agent=intent_agent,
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+
+    await svc.post_turn(user_id="u1", chat_id=None, user_message="hello")
+
+    assert len(intent_agent.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_review_confirm_uses_explicit_action(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="hello")
+
+    confirmed = await svc.confirm(chat_id=state0.chat_id)
+    assert confirmed.state.awaiting_confirmation is True
+    assert confirmed.state.execution_decision is not None or confirmed.state.execution_status in {"blocked", "idle"}
+
+
+@pytest.mark.asyncio
+async def test_review_text_through_turn_is_rejected(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="hello")
+
+    with pytest.raises(ValueError, match="review_pending_use_confirm_or_reject"):
+        await svc.post_user_message(chat_id=state0.chat_id, user_message="да")
+
+
+@pytest.mark.asyncio
+async def test_post_user_message_is_blocked_while_review_pending(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    turn1 = await svc.post_user_message(chat_id=state0.chat_id, user_message="do it")
+    assert turn1.state.awaiting_user_feedback is True
+    with pytest.raises(ValueError, match="review_pending_use_confirm_or_reject"):
+        await svc.post_user_message(chat_id=state0.chat_id, user_message="some free text")
+
+
+@pytest.mark.asyncio
+async def test_reject_review_exits_review_mode_without_execution(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    turn1 = await svc.post_user_message(chat_id=state0.chat_id, user_message="do it")
+    assert turn1.state.awaiting_user_feedback is True
+    out = await svc.reject_review(chat_id=state0.chat_id)
+    assert out.state.awaiting_user_feedback is False
+    assert out.state.awaiting_confirmation is False
+    assert out.state.execution_status == "idle"
+    assert any("не подтверждён" in m.lower() for m in out.state.assistant_messages)
+
+
+@pytest.mark.asyncio
+async def test_after_reject_review_user_can_send_new_message_again(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    turn1 = await svc.post_user_message(chat_id=state0.chat_id, user_message="first task")
+    assert turn1.state.awaiting_user_feedback is True
+    await svc.reject_review(chat_id=state0.chat_id)
+    turn2 = await svc.post_user_message(chat_id=state0.chat_id, user_message="second task")
+    assert turn2.state.normalized_request is not None
+
+
+@pytest.mark.asyncio
+async def test_confirm_flow_uses_endpoint_not_text_intent(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=_FixedIntentAgent(TurnIntent(kind="other", confidence=1.0, reason="ignored")),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeSelfExecuteDecisionAgent(),
+        execution_service=ExecutionService(model=object()),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    turn1 = await svc.post_user_message(chat_id=state0.chat_id, user_message="do it")
+    assert turn1.state.awaiting_user_feedback is True
+    with patch("app.services.execution_service.run_agent_with_fallback") as mocked_runner:
+        mocked_runner.return_value = "Here is the result."
+        out = await svc.confirm(chat_id=state0.chat_id)
+    assert out.state.execution_status == "completed"
+    assert mocked_runner.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_free_text_cannot_apply_correction_during_review(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="hello")
+    row1 = svc.chat_repo.get_latest_normalized_request(state0.chat_id)
+    assert row1 is not None
+    with pytest.raises(ValueError, match="review_pending_use_confirm_or_reject"):
+        await svc.post_user_message(chat_id=state0.chat_id, user_message="исправь или не так")
+    row2 = svc.chat_repo.get_latest_normalized_request(state0.chat_id)
+    assert row2.revision == row1.revision
+
+
+@pytest.mark.asyncio
+async def test_explicit_correction_does_not_use_intent_agent(session: Session):
+    intent_agent = _RecordingIntentAgent(TurnIntent(kind="new_task", confidence=1.0, reason="test"))
+    svc = ChatService(
+        session=session,
+        intent_agent=intent_agent,
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="hello")
+    n_calls = len(intent_agent.calls)
+    out = await svc.post_correction(chat_id=state0.chat_id, correction_message="change it")
+    assert out.state.normalized_request is not None
+    assert out.state.normalized_request.revision == 2
+    assert len(intent_agent.calls) == n_calls
+
+
+@pytest.mark.asyncio
+async def test_explicit_confirm_does_not_use_intent_agent(session: Session):
+    intent_agent = _RecordingIntentAgent(TurnIntent(kind="new_task", confidence=1.0, reason="test"))
+    svc = ChatService(
+        session=session,
+        intent_agent=intent_agent,
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="hello")
+    n_calls = len(intent_agent.calls)
+    out = await svc.confirm(chat_id=state0.chat_id)
+    assert out.state.execution_decision is not None or out.state.execution_status in {"blocked", "idle"}
+    assert len(intent_agent.calls) == n_calls
+
+
+def test_bundled_html_disables_composer_during_review():
+    from app.main import CHAT_HTML
+
+    assert "reviewActions" in CHAT_HTML
+    assert "syncUiFromState" in CHAT_HTML
+    assert "/chat/reject_review" in CHAT_HTML
+    assert "lastState?.awaiting_user_feedback" in CHAT_HTML
+
+
+@pytest.mark.asyncio
+async def test_single_memory_candidate_confirm_uses_explicit_action(session: Session):
+    svc = ChatService(
+        session=session,
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+
+    state0 = svc.start_chat(user_id="u1")
+    mem = MemoryService(session=session)
+    candidate = mem.create_explicit_candidate(
+        chat_id=state0.chat_id,
+        cand=MemoryCandidate(
+            memory_type="preference",
+            target_layer="core_profile",
+            normalized_memory="user prefers short answers",
+            source="user_requested",
+            confidence=0.9,
+            requires_confirmation=True,
+        ),
+    )
+
+    entry = mem.confirm_candidate(candidate_id=candidate.id, user_id="u1")
+    assert entry.status == "confirmed"
+    assert mem.repo.get_candidate(candidate.id).status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_single_memory_candidate_reject_uses_explicit_action(session: Session):
+    svc = ChatService(
+        session=session,
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+
+    state0 = svc.start_chat(user_id="u1")
+    mem = MemoryService(session=session)
+    candidate = mem.create_explicit_candidate(
+        chat_id=state0.chat_id,
+        cand=MemoryCandidate(
+            memory_type="preference",
+            target_layer="core_profile",
+            normalized_memory="user prefers short answers",
+            source="user_requested",
+            confidence=0.9,
+            requires_confirmation=True,
+        ),
+    )
+
+    mem.reject_candidate(candidate_id=candidate.id)
+    assert mem.repo.get_candidate(candidate.id).status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_close_chat_uses_explicit_action(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=FakeIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    await svc.post_user_message(chat_id=state0.chat_id, user_message="hello")
+    closed = await svc.close(chat_id=state0.chat_id)
+    assert closed.state.chat_closed is True
+
+
+@pytest.mark.asyncio
+async def test_non_fallback_case_still_uses_intent_agent(session: Session):
+    intent_agent = _RecordingIntentAgent(TurnIntent(kind="new_task", confidence=1.0, reason="test"))
+    svc = ChatService(
+        session=session,
+        intent_agent=intent_agent,
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+
+    state0 = svc.start_chat(user_id="u1")
+    out = await svc.post_user_message(chat_id=state0.chat_id, user_message="hello world")
+    assert len(intent_agent.calls) == 1
+    assert out.state.turn_intent is not None
+    assert out.state.turn_intent.kind == "new_task"
+
+
+@pytest.mark.asyncio
+async def test_multiple_memory_candidates_do_not_use_turn_text_for_approval(session: Session):
+    svc = ChatService(
+        session=session,
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+
+    state0 = svc.start_chat(user_id="u1")
+    mem = MemoryService(session=session)
+    mem.create_explicit_candidate(
+        chat_id=state0.chat_id,
+        cand=MemoryCandidate(
+            memory_type="preference",
+            target_layer="core_profile",
+            normalized_memory="user prefers short answers",
+            source="user_requested",
+            confidence=0.9,
+            requires_confirmation=True,
+        ),
+    )
+    mem.create_explicit_candidate(
+        chat_id=state0.chat_id,
+        cand=MemoryCandidate(
+            memory_type="preference",
+            target_layer="core_profile",
+            normalized_memory="user prefers direct answers",
+            source="user_requested",
+            confidence=0.9,
+            requires_confirmation=True,
+        ),
+    )
+
+    with pytest.raises(CriticalTurnError):
+        await svc.post_user_message(chat_id=state0.chat_id, user_message="confirm")
+
+
+@pytest.mark.asyncio
+async def test_graph_applies_explicit_correction_path_without_reclassifying(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=_FailingIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    state0.raw_user_message = "make it shorter"
+    state0.explicit_normalized_review_action = "correction"
+    state0.turn_intent = TurnIntent(kind="other", confidence=1.0, reason="orchestrator placeholder")
+    state0.normalized_request = NormalizedUserRequest(
+        normalized_user_request="normalize: hello",
+        continuity="new",
+        needs_clarification=False,
+        clarification_reason=None,
+        clarification_options=[],
+        ambiguity_handling="none",
+        revision=1,
+    )
+
+    out = await svc.graphs.main_chat_graph().ainvoke(state0)
+    result = ChatState.model_validate(out)
+
+    assert result.explicit_normalized_review_action is None
+    assert result.normalized_request is not None
+
+
+@pytest.mark.asyncio
+async def test_graph_confirm_path_uses_explicit_action_not_turn_intent(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=_FailingIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    state0.raw_user_message = None
+    state0.explicit_normalized_review_action = "confirm"
+    state0.turn_intent = TurnIntent(kind="other", confidence=1.0, reason="orchestrator placeholder")
+    state0.normalized_request = NormalizedUserRequest(
+        normalized_user_request="normalize: hello",
+        continuity="new",
+        needs_clarification=False,
+        clarification_reason=None,
+        clarification_options=[],
+        ambiguity_handling="none",
+        revision=1,
+    )
+
+    out = await svc.graphs.main_chat_graph().ainvoke(state0)
+    result = ChatState.model_validate(out)
+
+    assert result.awaiting_confirmation is True
+    assert result.explicit_normalized_review_action is None
+
+
+@pytest.mark.asyncio
+async def test_turn_intent_routes_new_task_without_reclassification(session: Session):
+    svc = ChatService(
+        session=session,
+        intent_agent=_FailingIntentAgent(),
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+    state0.raw_user_message = "new task"
+    state0.turn_intent = TurnIntent(kind="new_task", confidence=1.0, reason="precomputed")
+
+    out = await svc.graphs.main_chat_graph().ainvoke(state0)
+    result = ChatState.model_validate(out)
+
+    assert result.normalized_request is not None
 
 
 @pytest.mark.asyncio
@@ -910,7 +1525,7 @@ def test_pending_memory_dedup_uses_full_candidate_identity(session: Session):
 
 
 @pytest.mark.asyncio
-async def test_chat_message_can_confirm_memory_candidate_via_intent(session: Session):
+async def test_memory_candidate_confirm_uses_explicit_action_endpoint(session: Session):
     mem = MemoryService(session=session)
     chat = Chat(user_id="u1")
     session.add(chat)
@@ -930,17 +1545,12 @@ async def test_chat_message_can_confirm_memory_candidate_via_intent(session: Ses
 
     svc = ChatService(
         session=session,
-        intent_agent=_FixedIntentAgent(
-            TurnIntent(kind="memory_confirm", memory_candidate_id=row.id, confidence=1.0, reason="test")
-        ),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
-    # Ensure chat exists with the same user_id for user scoping.
-    svc.chat_repo.create_chat("u1")  # create another chat; we will use the original chat.id below via repo
-    out = await svc.post_user_message(chat_id=chat.id, user_message="confirm that memory candidate")
-    assert any("confirmed" in m.lower() for m in out.state.assistant_messages)
-    assert len(list(session.exec(select(MemoryEntryRow).where(MemoryEntryRow.user_id == "u1")))) == 1
+    assert len(list(session.exec(select(MemoryEntryRow).where(MemoryEntryRow.user_id == "u1")))) == 0
+    confirmed = MemoryService(session=session).confirm_candidate(candidate_id=row.id, user_id="u1")
+    assert confirmed.status == "confirmed"
 
 
 @pytest.mark.asyncio
@@ -1027,6 +1637,7 @@ def test_graph_contains_required_node_names(session: Session):
     main_nodes = set(main.get_graph().nodes.keys())
     assert "apply_user_correction" in main_nodes
     assert "handle_memory_command" in main_nodes
+    assert "close_chat" not in main_nodes
 
     mem = svc.graphs.memory_graph()
     mem_nodes = set(mem.get_graph().nodes.keys())

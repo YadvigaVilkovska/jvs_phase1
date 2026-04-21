@@ -6,6 +6,7 @@ from sqlmodel import Session
 
 from app.api.deps import db_session
 from app.domain.chat_state import ChatState
+from app.services.chat_orchestrator import CriticalTurnError
 from app.services.chat_service import ChatService
 
 
@@ -66,8 +67,15 @@ async def post_message(req: PostMessageRequest, session: Session = Depends(db_se
     svc = ChatService(session=session)
     try:
         result = await svc.post_user_message(chat_id=req.chat_id, user_message=req.user_message)
+    except CriticalTurnError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        msg = str(e)
+        if msg == "chat not found":
+            raise HTTPException(status_code=404, detail=msg)
+        if msg == "review_pending_use_confirm_or_reject":
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
     return ChatStateResponse(state=result.state)
 
 
@@ -113,8 +121,15 @@ async def post_turn(req: PostTurnRequest, session: Session = Depends(db_session)
             chat_id=req.chat_id,
             user_message=req.user_message,
         )
+    except CriticalTurnError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        msg = str(e)
+        if msg == "chat not found":
+            raise HTTPException(status_code=404, detail=msg)
+        if msg == "review_pending_use_confirm_or_reject":
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
     except RuntimeError as e:
         # Honest failure when no LLM providers are configured for intent routing.
         raise HTTPException(status_code=503, detail=str(e))
@@ -154,6 +169,8 @@ async def post_correction(req: PostCorrectionRequest, session: Session = Depends
     svc = ChatService(session=session)
     try:
         result = await svc.post_correction(chat_id=req.chat_id, correction_message=req.correction_message)
+    except CriticalTurnError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return ChatStateResponse(state=result.state)
@@ -175,7 +192,29 @@ async def confirm(req: ConfirmRequest, session: Session = Depends(db_session)):
     try:
         result = await svc.confirm(chat_id=req.chat_id)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        detail = str(e)
+        if "not found" in detail:
+            raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=400, detail=detail)
+    return ChatStateResponse(state=result.state)
+
+
+class RejectReviewRequest(BaseModel):
+    chat_id: str = Field(..., min_length=1)
+
+
+@router.post("/reject_review", response_model=ChatStateResponse)
+async def reject_review(req: RejectReviewRequest, session: Session = Depends(db_session)):
+    svc = ChatService(session=session)
+    try:
+        result = await svc.reject_review(chat_id=req.chat_id)
+    except ValueError as e:
+        msg = str(e)
+        if msg == "chat not found":
+            raise HTTPException(status_code=404, detail=msg)
+        if msg == "chat is not awaiting review":
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
     return ChatStateResponse(state=result.state)
 
 
