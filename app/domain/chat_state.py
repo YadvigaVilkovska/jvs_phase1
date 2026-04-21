@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from app.domain.execution_decision import ExecutionDecision
 from app.domain.memory_candidate import MemoryCandidate
 from app.domain.normalized_user_request import NormalizedUserRequest
+from app.domain.turn_intent import TurnIntent
 
 
 class ChatState(BaseModel):
@@ -20,6 +21,7 @@ class ChatState(BaseModel):
     chat_id: str
     user_id: str
     raw_user_message: str | None = None
+    turn_intent: TurnIntent | None = None
     normalized_request: Optional[NormalizedUserRequest] = None
     normalized_request_history: List[NormalizedUserRequest] = Field(default_factory=list)
     awaiting_user_feedback: bool = False
@@ -30,4 +32,5 @@ class ChatState(BaseModel):
     user_corrections: List[str] = Field(default_factory=list)
     explicit_memory_command: bool = False
     memory_candidates: List[MemoryCandidate] = Field(default_factory=list)
+    communication_rule_context: str = ""
     chat_closed: bool = False

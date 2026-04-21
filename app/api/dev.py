@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.api.deps import db_session
-from app.dev.stub_agents import FakeNormalizationAgent, FakeSelfExecuteDecisionAgent
+from app.dev.stub_agents import FakeIntentAgent, FakeNormalizationAgent, FakeSelfExecuteDecisionAgent
 from app.services.chat_service import ChatService
 from app.services.execution_service import ExecutionService
 from app.settings import settings
@@ -89,6 +89,7 @@ def _chat_service_for_demo(session: Session) -> ChatService:
         runner = TestModel(custom_output_text="Demo: stub runner output (no external tools).")
         return ChatService(
             session=session,
+            intent_agent=FakeIntentAgent(),
             normalization_agent=FakeNormalizationAgent(),
             execution_agent=FakeSelfExecuteDecisionAgent(),
             execution_service=ExecutionService(model=runner),

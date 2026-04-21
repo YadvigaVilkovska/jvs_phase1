@@ -65,6 +65,20 @@ class MemoryRepository:
             return True
         return False
 
+    def has_pending_equivalent_candidate(self, *, chat_id: str, cand: MemoryCandidate) -> bool:
+        """
+        Compare a candidate by the full semantic identity used for durable review.
+
+        Keeping this comparison in the repository makes the dedup rule explicit and testable.
+        """
+        return self.has_pending_equivalent_normalized_memory(
+            chat_id=chat_id,
+            normalized_memory=cand.normalized_memory,
+            memory_type=cand.memory_type,
+            target_layer=cand.target_layer,
+            source=cand.source,
+        )
+
     def get_candidate(self, candidate_id: str) -> MemoryCandidateRow | None:
         return self.session.get(MemoryCandidateRow, candidate_id)
 

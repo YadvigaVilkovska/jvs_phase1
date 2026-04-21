@@ -49,6 +49,7 @@ class ExecutionService:
         *,
         decision: ExecutionDecision,
         request: NormalizedUserRequest,
+        communication_rule_context: str = "",
     ) -> ExecutionRunResult:
         if not decision.can_execute_self:
             return ExecutionRunResult(status="blocked", message=decision.reason)
@@ -71,6 +72,7 @@ class ExecutionService:
         prompt = (
             "Execute this request without external tools.\n"
             "Follow any language, length, tone, or format constraints stated in normalized_user_request exactly.\n\n"
+            f"communication_rule_context:\n{communication_rule_context or '(none)'}\n\n"
             f"normalized_user_request: {request.normalized_user_request}\n"
         )
         text = await run_agent_with_fallback(

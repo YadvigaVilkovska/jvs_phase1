@@ -203,22 +203,13 @@ CHAT_HTML = """
     <div class="topbar">
       <div class="title">Jeeves</div>
       <div class="status" id="status">Нет активного чата</div>
-      <div class="top-actions">
-        <button id="startBtn">Start chat</button>
-        <button id="confirmBtn" class="secondary" disabled>Confirm</button>
-        <button id="closeBtn" class="danger" disabled>Close chat</button>
-      </div>
     </div>
 
     <div class="chat" id="chat"></div>
 
     <div class="composer">
       <textarea id="input" placeholder="Напиши сообщение..."></textarea>
-      <div class="actions">
-        <button id="sendBtn" disabled>Send message</button>
-        <button id="correctionBtn" class="secondary" disabled>Send correction</button>
-      </div>
-      <div class="status" id="meta">Обычный flow: Start → Message → Confirm / Correction</div>
+      <div class="status" id="meta">Обычный flow: напиши в чат (сервер сам поймёт confirm/correction/новая задача)</div>
     </div>
   </div>
 
@@ -227,12 +218,6 @@ CHAT_HTML = """
     const inputEl = document.getElementById("input");
     const statusEl = document.getElementById("status");
     const metaEl = document.getElementById("meta");
-
-    const startBtn = document.getElementById("startBtn");
-    const sendBtn = document.getElementById("sendBtn");
-    const correctionBtn = document.getElementById("correctionBtn");
-    const confirmBtn = document.getElementById("confirmBtn");
-    const closeBtn = document.getElementById("closeBtn");
 
     let chatId = null;
     let lastState = null;
@@ -257,15 +242,10 @@ CHAT_HTML = """
       const awaitingConfirmation = !!state?.awaiting_confirmation;
       const closed = !!state?.chat_closed;
 
-      sendBtn.disabled = !hasChat || awaitingFeedback || closed;
-      correctionBtn.disabled = !hasChat || !awaitingFeedback || closed;
-      confirmBtn.disabled = !hasChat || !awaitingFeedback || closed;
-      closeBtn.disabled = !hasChat || closed;
-
       metaEl.textContent =
         hasChat
           ? `chat_id=${chatId} · awaiting_feedback=${awaitingFeedback} · awaiting_confirmation=${awaitingConfirmation} · execution_status=${state?.execution_status ?? "idle"}`
-          : "Обычный flow: Start → Message → Confirm / Correction";
+          : "Обычный flow: напиши в чат";
     }
 
     async function api(path, payload) {
@@ -290,38 +270,24 @@ CHAT_HTML = """
       return data;
     }
 
-    startBtn.onclick = async () => {
+    async function sendText(text) {
+      const msg = (text || "").trim();
+      if (!msg) return;
+      const id = chatId; // may be null before first /turn
+
       try {
-        const userId = "local-user";
-        const data = await api("/chat/start", { user_id: userId });
+        addMessage("user", msg);
+
+        const data = await api("/chat/turn", {
+          chat_id: id,
+          user_id: "local-user",
+          user_message: msg,
+        });
+
         chatId = data.chat_id;
-        chatEl.innerHTML = "";
-        addMessage("system", `Чат создан: ${chatId}`);
-        setStatus("Чат активен");
-        syncUiFromState({
-          awaiting_user_feedback: false,
-          awaiting_confirmation: false,
-          execution_status: "idle",
-          chat_closed: false,
-        });
-      } catch (e) {
-        addMessage("system", `Ошибка start: ${e.message}`);
-      }
-    };
-
-    sendBtn.onclick = async () => {
-      const text = inputEl.value.trim();
-      if (!text || !chatId) return;
-
-      try {
-        addMessage("user", text);
-        inputEl.value = "";
-
-        const data = await api("/chat/message", {
-          chat_id: chatId,
-          user_message: text,
-        });
-
+        if (chatEl.innerHTML === "" && chatId) {
+          addMessage("system", `Чат создан: ${chatId}`);
+        }
         const state = data.state;
         for (const msg of state.assistant_messages || []) {
           addMessage("assistant", msg);
@@ -330,59 +296,16 @@ CHAT_HTML = """
       } catch (e) {
         addMessage("system", `Ошибка message: ${e.message}`);
       }
-    };
+    }
 
-    correctionBtn.onclick = async () => {
-      const text = inputEl.value.trim();
-      if (!text || !chatId) return;
-
-      try {
-        addMessage("user", `[correction] ${text}`);
-        inputEl.value = "";
-
-        const data = await api("/chat/correction", {
-          chat_id: chatId,
-          correction_message: text,
-        });
-
-        const state = data.state;
-        for (const msg of state.assistant_messages || []) {
-          addMessage("assistant", msg);
-        }
-        syncUiFromState(state);
-      } catch (e) {
-        addMessage("system", `Ошибка correction: ${e.message}`);
-      }
-    };
-
-    confirmBtn.onclick = async () => {
-      if (!chatId) return;
-
-      try {
-        const data = await api("/chat/confirm", { chat_id: chatId });
-        const state = data.state;
-
-        for (const msg of state.assistant_messages || []) {
-          addMessage("assistant", msg);
-        }
-        syncUiFromState(state);
-      } catch (e) {
-        addMessage("system", `Ошибка confirm: ${e.message}`);
-      }
-    };
-
-    closeBtn.onclick = async () => {
-      if (!chatId) return;
-
-      try {
-        const data = await api("/chat/close", { chat_id: chatId });
-        const state = data.state;
-        addMessage("system", "Чат закрыт");
-        syncUiFromState(state);
-      } catch (e) {
-        addMessage("system", `Ошибка close: ${e.message}`);
-      }
-    };
+    inputEl.addEventListener("keydown", async (e) => {
+      if (e.key !== "Enter") return;
+      if (e.shiftKey) return;
+      e.preventDefault();
+      const text = inputEl.value;
+      inputEl.value = "";
+      await sendText(text);
+    });
   </script>
 </body>
 </html>

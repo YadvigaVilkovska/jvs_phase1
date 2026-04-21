@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any, Optional
+from sqlalchemy import UniqueConstraint
 from uuid import uuid4
 
 from sqlmodel import Field, SQLModel
@@ -103,6 +104,54 @@ class MemoryEntryRow(SQLModel, table=True):
     status: str = Field(index=True)
 
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+class CommunicationRuleCandidateRow(SQLModel, table=True):
+    __tablename__ = "communication_rule_candidates"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    user_id: str = Field(index=True)
+    chat_id: str = Field(index=True)
+    rule_key: str = Field(index=True)
+    rule_text: str
+    scope: str = Field(index=True)
+    extraction_confidence: float
+    initial_score: float
+    status: str = Field(default="candidate", index=True)
+    rule_state_id: str | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class CommunicationRuleEvidenceRow(SQLModel, table=True):
+    __tablename__ = "communication_rule_evidence"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    rule_state_id: str = Field(index=True)
+    event_type: str = Field(index=True)
+    delta: float
+    message_id: str | None = Field(default=None, index=True)
+    candidate_id: str | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class CommunicationRuleStateRow(SQLModel, table=True):
+    __tablename__ = "communication_rule_state"
+    __table_args__ = (
+        UniqueConstraint("user_id", "rule_key", "scope", "chat_id", name="uq_communication_rule_state_identity"),
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    user_id: str = Field(index=True)
+    chat_id: str | None = Field(default=None, index=True)
+    rule_key: str = Field(index=True)
+    scope: str = Field(index=True)
+    canonical_value_json: str | None = None
+    score: float
+    status: str = Field(index=True)
+    evidence_count: int = Field(default=0)
+    last_confirmed_at: datetime | None = None
+    last_applied_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=_utcnow, index=True)
 
 
 class CoreProfileEntryRow(SQLModel, table=True):

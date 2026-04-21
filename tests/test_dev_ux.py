@@ -53,6 +53,21 @@ def test_dev_demo_flow_stub_agents(api_client: TestClient):
     assert data["assistant_messages_tail"]
 
 
+def test_chat_turn_creates_chat_without_chat_id(api_client: TestClient):
+    # /chat/turn must be able to start a chat from the first user message.
+    r = api_client.post(
+        "/chat/turn",
+        json={
+            "chat_id": None,
+            "user_id": "u-turn",
+            "user_message": "Hello",
+        },
+    )
+    # In this repo, /chat/* requires LLM providers; with providers disabled in this fixture,
+    # it must fail honestly.
+    assert r.status_code == 503
+
+
 def test_dev_demo_flow_without_stub_returns_503(monkeypatch, tmp_path):
     db = tmp_path / "no_stub.db"
     monkeypatch.setattr(settings, "database_url", f"sqlite:///{db}")

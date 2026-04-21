@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from app.domain.execution_decision import ExecutionDecision
 from app.domain.normalized_user_request import NormalizedUserRequest
+from app.domain.turn_intent import TurnIntent
 
 
 class FakeNormalizationAgent:
@@ -44,6 +45,34 @@ class FakeExecutionAgent:
             needs_user_confirmation=False,
             reason="fake",
         )
+
+
+class FakeIntentAgent:
+    """
+    Test double for LLM intent routing.
+
+    This is ONLY for unit tests and dev-only endpoints. Production routing must remain LLM-first.
+    """
+
+    async def classify(self, *, raw_user_message: str, context: dict) -> TurnIntent:
+        text = (raw_user_message or "").strip().lower()
+        awaiting_feedback = bool(context.get("awaiting_user_feedback"))
+        has_norm = bool(context.get("has_normalized_request"))
+
+        if text.startswith("запомни") or text.startswith("remember"):
+            payload = raw_user_message.strip()
+            for prefix in ("запомни", "remember"):
+                if payload.lower().startswith(prefix):
+                    payload = payload[len(prefix) :].strip(" :—-")
+            return TurnIntent(kind="memory_store", memory_text=payload, confidence=0.9, reason="fake memory_store")
+
+        if awaiting_feedback and has_norm and text in {"confirm", "confirmed", "yes", "ok", "okay", "да", "подтверждаю", "верно"}:
+            return TurnIntent(kind="confirm", confidence=0.9, reason="fake confirm")
+
+        if awaiting_feedback and has_norm:
+            return TurnIntent(kind="correction", correction_text=raw_user_message, confidence=0.7, reason="fake correction")
+
+        return TurnIntent(kind="new_task", confidence=0.7, reason="fake new_task")
 
 
 class FakeSelfExecuteDecisionAgent:

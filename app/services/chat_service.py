@@ -1,134 +1,69 @@
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-
 from sqlmodel import Session
 
 from app.agents.execution_agent import ExecutionAgent
+from app.agents.intent_agent import IntentAgent
+from app.agents.memory_agent import MemoryAgent
 from app.agents.normalization_agent import NormalizationAgent
 from app.domain.chat_state import ChatState
-from app.domain.normalized_user_request import NormalizedUserRequest
 from app.graph.graph_factory import GraphFactory
-from app.repositories.chat_repository import ChatRepository
+from app.services.chat_orchestrator import ChatOrchestrator, ChatTurnResult
+from app.services.communication_rule_service import CommunicationRuleService
 from app.services.execution_service import ExecutionService
 from app.tasks.post_chat_analysis import run_post_chat_analysis
 
 
-@dataclass(frozen=True)
-class ChatTurnResult:
-    state: ChatState
-
-
-def _row_to_normalized_request(row) -> NormalizedUserRequest:
-    """Rebuild NUR from persistence. Understanding-flow fields are not stored (see docs/UNDERSTANDING_FLOW.md)."""
-    return NormalizedUserRequest(
-        normalized_user_request=row.normalized_user_request,
-        continuity=row.continuity,
-        needs_clarification=row.needs_clarification,
-        clarification_reason=row.clarification_reason,
-        clarification_options=json.loads(row.clarification_options_json or "[]"),
-        ambiguity_handling=row.ambiguity_handling,
-        revision=row.revision,
-    )
+def _run_post_chat_analysis(*, session: Session, chat_id: str):
+    return run_post_chat_analysis(session=session, chat_id=chat_id)
 
 
 class ChatService:
+    """
+    Thin facade over the application orchestration layer.
+
+    Keeping this class small preserves the public API while making the workflow easier to test.
+    """
+
     def __init__(
         self,
         *,
         session: Session,
         normalization_agent: NormalizationAgent | None = None,
         execution_agent: ExecutionAgent | None = None,
+        intent_agent: IntentAgent | None = None,
+        communication_rule_service: CommunicationRuleService | None = None,
         execution_service: ExecutionService | None = None,
+        graph_factory: GraphFactory | None = None,
     ):
-        self.session = session
-        self.chat_repo = ChatRepository(session)
-        self.normalization_agent = normalization_agent or NormalizationAgent()
-        self.execution_agent = execution_agent or ExecutionAgent()
-        self.graphs = GraphFactory(
-            chat_repo=self.chat_repo,
-            normalization_agent=self.normalization_agent,
-            execution_agent=self.execution_agent,
+        self.orchestrator = ChatOrchestrator(
+            session=session,
+            normalization_agent=normalization_agent,
+            execution_agent=execution_agent,
+            intent_agent=intent_agent,
+            communication_rule_service=communication_rule_service,
             execution_service=execution_service,
+            graph_factory=graph_factory,
+            post_chat_analysis_runner=_run_post_chat_analysis,
         )
-
-    def _load_state(self, chat_id: str) -> ChatState:
-        chat = self.chat_repo.get_chat(chat_id)
-        if not chat:
-            raise ValueError("chat not found")
-
-        latest = self.chat_repo.get_latest_normalized_request(chat_id)
-        history_rows = self.chat_repo.list_normalized_requests(chat_id)
-        history = [_row_to_normalized_request(r) for r in history_rows]
-        normalized = _row_to_normalized_request(latest) if latest else None
-
-        # Chat.status is used as the persisted orchestration status.
-        awaiting_feedback = chat.status in ("awaiting_feedback", "awaiting_memory_review")
-        awaiting_confirmation = chat.status == "awaiting_confirmation"
-
-        return ChatState(
-            chat_id=chat.id,
-            user_id=chat.user_id,
-            raw_user_message=None,
-            normalized_request=normalized,
-            normalized_request_history=history,
-            awaiting_user_feedback=awaiting_feedback,
-            awaiting_confirmation=awaiting_confirmation,
-            execution_decision=None,
-            execution_status="idle",
-            assistant_messages=[],
-            user_corrections=[],
-            explicit_memory_command=False,
-            memory_candidates=[],
-            chat_closed=(chat.status == "closed"),
-        )
+        self.chat_repo = self.orchestrator.chat_repo
+        self.graphs = self.orchestrator.graphs
+        self.communication_rule_service = self.orchestrator.communication_rule_service
 
     def start_chat(self, *, user_id: str) -> ChatState:
-        chat = self.chat_repo.create_chat(user_id)
-        return ChatState(chat_id=chat.id, user_id=user_id)
+        return self.orchestrator.start_chat(user_id=user_id)
+
+    async def post_turn(self, *, user_id: str, chat_id: str | None, user_message: str) -> tuple[str, ChatTurnResult]:
+        return await self.orchestrator.post_turn(user_id=user_id, chat_id=chat_id, user_message=user_message)
 
     async def post_user_message(self, *, chat_id: str, user_message: str) -> ChatTurnResult:
-        state = self._load_state(chat_id)
-        state.raw_user_message = user_message
-        graph = self.graphs.main_chat_graph()
-        out = await graph.ainvoke(state)
-        return ChatTurnResult(state=ChatState.model_validate(out))
+        return await self.orchestrator.post_user_message(chat_id=chat_id, user_message=user_message)
 
     async def post_correction(self, *, chat_id: str, correction_message: str) -> ChatTurnResult:
-        state = self._load_state(chat_id)
-        state.raw_user_message = correction_message
-        state.awaiting_user_feedback = True
-        graph = self.graphs.main_chat_graph()
-        out = await graph.ainvoke(state)
-        return ChatTurnResult(state=ChatState.model_validate(out))
+        return await self.orchestrator.post_correction(chat_id=chat_id, correction_message=correction_message)
 
     async def confirm(self, *, chat_id: str) -> ChatTurnResult:
-        state = self._load_state(chat_id)
-        state.awaiting_confirmation = True
-        graph = self.graphs.main_chat_graph()
-        out = await graph.ainvoke(state)
-        return ChatTurnResult(state=ChatState.model_validate(out))
+        return await self.orchestrator.confirm(chat_id=chat_id)
 
     async def close(self, *, chat_id: str) -> ChatTurnResult:
-        """
-        Close chat and trigger post-chat memory analysis (candidates only).
-
-        This keeps strict separation: analysis creates candidates, confirmation happens via memory endpoints.
-
-        Post-chat extraction runs until it completes successfully once (`chats.post_chat_extraction_completed`).
-        Duplicate `/chat/close` calls do not create duplicate post-chat candidates. If extraction raises
-        after the chat was already marked closed, a later close retries extraction (flag stays false).
-        """
-        chat = self.chat_repo.get_chat(chat_id)
-        if not chat:
-            raise ValueError("chat not found")
-        if not chat.post_chat_extraction_completed:
-            if chat.status != "closed":
-                self.chat_repo.close_chat(chat_id)
-            await run_post_chat_analysis(session=self.session, chat_id=chat_id)
-            self.chat_repo.mark_post_chat_extraction_completed(chat_id)
-        state = self._load_state(chat_id)
-        state.chat_closed = True
-        return ChatTurnResult(state=state)
-
+        return await self.orchestrator.close(chat_id=chat_id)

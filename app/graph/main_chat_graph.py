@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from langgraph.graph import END, StateGraph
 from pydantic import ValidationError
 
+from app.agents.intent_agent import IntentAgent
 from app.agents.execution_agent import ExecutionAgent
 from app.agents.memory_agent import MemoryAgent
 from app.agents.normalization_agent import NormalizationAgent
@@ -12,6 +13,7 @@ from app.domain.chat_state import ChatState
 from app.domain.normalized_user_request import NormalizedUserRequest
 from app.repositories.chat_repository import ChatRepository
 from app.repositories.memory_repository import MemoryRepository
+from app.services.communication_rule_service import CommunicationRuleService
 from app.services.execution_service import ExecutionService
 
 
@@ -20,7 +22,9 @@ class MainChatGraphDeps:
     chat_repo: ChatRepository
     normalization_agent: NormalizationAgent
     execution_agent: ExecutionAgent
+    intent_agent: IntentAgent
     memory_agent: MemoryAgent | None = None
+    communication_rule_service: CommunicationRuleService | None = None
     execution_service: ExecutionService | None = None
 
 
@@ -46,26 +50,6 @@ def _render_normalized(req: NormalizedUserRequest) -> str:
     return "\n".join(parts)
 
 
-def _is_explicit_memory_command(text: str) -> bool:
-    """True if the message is routed as an explicit memory command (narrow prefix heuristic only).
-
-    Only trimmed text starting with Russian «запомни» or English «remember» (case-insensitive) matches.
-    This is not a general intent classifier; other phrasings are handled as normal chat. See
-    docs/PHASE1_MEMORY.md.
-    """
-    t = text.strip().lower()
-    return t.startswith("запомни") or t.startswith("remember")
-
-
-def _strip_memory_command_prefix(text: str) -> str:
-    raw = text.strip()
-    lowered = raw.lower()
-    for prefix in ("запомни", "remember"):
-        if lowered.startswith(prefix):
-            return raw[len(prefix) :].strip(" :—-")
-    return raw
-
-
 def build_main_chat_graph(deps: MainChatGraphDeps):
     """
     Main Chat Graph (v1).
@@ -84,8 +68,56 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
         # Persist the message first.
         deps.chat_repo.add_message(state.chat_id, "user", state.raw_user_message)
 
-        # Detect explicit memory command (routing handled later).
-        state.explicit_memory_command = _is_explicit_memory_command(state.raw_user_message)
+        if deps.communication_rule_service is not None:
+            # Build context for this turn + optionally ingest explicit communication preference requests.
+            state.communication_rule_context = deps.communication_rule_service.build_prompt_context(
+                user_id=state.user_id,
+                chat_id=state.chat_id,
+            )
+            await deps.communication_rule_service.ingest_explicit_request(
+                user_id=state.user_id,
+                chat_id=state.chat_id,
+                raw_user_message=state.raw_user_message,
+            )
+            state.communication_rule_context = deps.communication_rule_service.build_prompt_context(
+                user_id=state.user_id,
+                chat_id=state.chat_id,
+            )
+
+        # LLM-first routing of the user's intent for this turn (can be precomputed by ChatService).
+        if state.turn_intent is None:
+            ctx = {
+                "chat_id": state.chat_id,
+                "user_id": state.user_id,
+                "chat_closed": state.chat_closed,
+                "awaiting_user_feedback": state.awaiting_user_feedback,
+                "awaiting_confirmation": state.awaiting_confirmation,
+                "has_normalized_request": state.normalized_request is not None,
+                "normalized_request_json": state.normalized_request.model_dump() if state.normalized_request else None,
+                "communication_rule_context": state.communication_rule_context,
+                "pending_memory_candidates": [
+                    {"normalized_memory": c.normalized_memory, "requires_confirmation": c.requires_confirmation}
+                    for c in (state.memory_candidates or [])
+                ],
+            }
+            intent = await deps.intent_agent.classify(raw_user_message=state.raw_user_message, context=ctx)
+            state.turn_intent = intent
+
+        # Memory store is routed ONLY by LLM intent (no prefix heuristics).
+        state.explicit_memory_command = bool(state.turn_intent is not None and state.turn_intent.kind == "memory_store")
+
+        # IMPORTANT: state mutations must happen in nodes, not in conditional edge functions.
+        # Otherwise LangGraph may not persist them.
+        if state.turn_intent is not None:
+            if state.turn_intent.kind == "confirm":
+                state.awaiting_confirmation = True
+                state.awaiting_user_feedback = False
+            elif state.turn_intent.kind == "correction":
+                state.awaiting_confirmation = False
+            elif state.turn_intent.kind == "new_task":
+                # Treat as a fresh request; clear any feedback gate from previous draft.
+                state.awaiting_confirmation = False
+                state.awaiting_user_feedback = False
         return state
 
     async def normalize_user_request(state: ChatState) -> ChatState:
@@ -97,12 +129,13 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
             # Confirmation endpoint should not trigger normalization.
             return state
 
-        # If we're waiting for user feedback on an existing normalized request,
-        # do not create a new request here — correction path handles this.
+        # If we're waiting for user feedback on an existing normalized request, we only normalize
+        # when the intent is explicitly a new task (otherwise correction path handles it).
         if state.normalized_request is not None and state.awaiting_user_feedback:
-            return state
+            if state.turn_intent is None or state.turn_intent.kind != "new_task":
+                return state
 
-        revision = 1
+        revision = (state.normalized_request.revision + 1) if state.normalized_request is not None else 1
         req = await deps.normalization_agent.normalize(
             raw_user_message=state.raw_user_message,
             previous=state.normalized_request,
@@ -122,11 +155,16 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
         if state.normalized_request is None:
             return state
 
+        corr_text = (
+            state.turn_intent.correction_text
+            if state.turn_intent is not None and state.turn_intent.kind == "correction"
+            else state.raw_user_message
+        )
         corrected = await deps.normalization_agent.apply_correction(
-            correction_message=state.raw_user_message,
+            correction_message=corr_text,
             previous=state.normalized_request,
         )
-        state.user_corrections.append(state.raw_user_message)
+        state.user_corrections.append(corr_text)
         state.normalized_request = corrected
         state.normalized_request_history.append(corrected)
 
@@ -134,7 +172,7 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
         mem_repo = MemoryRepository(deps.chat_repo.session)  # type: ignore[attr-defined]
         try:
             pref = await mem_agent.standing_preference_from_correction(
-                correction_message=state.raw_user_message,
+                correction_message=corr_text,
                 revised_normalized=corrected,
             )
         except RuntimeError:
@@ -144,10 +182,7 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
             # Malformed StandingPreferenceExtraction payload from the model.
             pref = None
 
-        if pref is not None and mem_repo.has_pending_equivalent_normalized_memory(
-            chat_id=state.chat_id,
-            normalized_memory=pref.normalized_memory,
-        ):
+        if pref is not None and mem_repo.has_pending_equivalent_candidate(chat_id=state.chat_id, cand=pref):
             pref = None
 
         if pref is not None:
@@ -178,7 +213,7 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
         mem_agent = deps.memory_agent or MemoryAgent()
         mem_repo = MemoryRepository(deps.chat_repo.session)  # type: ignore[attr-defined]
 
-        payload = _strip_memory_command_prefix(state.raw_user_message)
+        payload = state.turn_intent.memory_text if state.turn_intent is not None else state.raw_user_message
         candidate = await mem_agent.explicit_memory_candidate(raw_user_message=payload)
         row = mem_repo.add_candidate(chat_id=state.chat_id, cand=candidate)
 
@@ -190,7 +225,7 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
             f"`{candidate.normalized_memory}`\n"
             f"Target layer: `{candidate.target_layer}`\n"
             f"Candidate id: `{row.id}`\n"
-            "Confirm or reject via the memory candidate endpoints."
+            "Confirm or reject by sending a normal chat message (no buttons)."
         )
         deps.chat_repo.add_message(state.chat_id, "assistant", msg)
         state.assistant_messages.append(msg)
@@ -261,9 +296,6 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
                 decision=decision,
             )
 
-        deps.chat_repo.add_message(state.chat_id, "assistant", f"ExecutionDecision: {decision.model_dump()}")
-        state.assistant_messages.append(f"ExecutionDecision: {decision.model_dump()}")
-
         if not decision.can_execute_self:
             state.execution_status = "blocked"
         return state
@@ -280,6 +312,7 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
         run = await runner.execute(
             decision=state.execution_decision,
             request=state.normalized_request,
+            communication_rule_context=state.communication_rule_context,
         )
 
         if run.status == "completed":
@@ -312,12 +345,14 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
     builder.set_entry_point("receive_user_message")
 
     def _after_receive(state: ChatState) -> str:
-        if state.awaiting_confirmation:
+        intent_kind = state.turn_intent.kind if state.turn_intent is not None else None
+        if intent_kind == "confirm":
             return "confirm_normalized_request"
-        if state.explicit_memory_command:
+        if intent_kind == "memory_store":
             return "handle_memory_command"
-        if state.normalized_request is not None and state.awaiting_user_feedback and not state.awaiting_confirmation:
+        if intent_kind == "correction":
             return "apply_user_correction"
+        # Default: treat as a new task (including when user asks a different question mid-review).
         return "normalize_user_request"
 
     builder.add_conditional_edges("receive_user_message", _after_receive)
@@ -346,4 +381,3 @@ def build_main_chat_graph(deps: MainChatGraphDeps):
     builder.add_edge("close_chat", END)
 
     return builder.compile()
-

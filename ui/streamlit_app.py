@@ -81,24 +81,10 @@ def main() -> None:
     with st.sidebar:
         st.subheader("Session")
         st.session_state.user_id = st.text_input("User ID", value=st.session_state.user_id)
-        if st.button("Start chat", type="primary"):
-            out = _request("POST", "/chat/start", json={"user_id": st.session_state.user_id})
-            if out:
-                st.session_state.chat_id = out["chat_id"]
-                st.session_state.messages = []
-                st.session_state.last_state = None
-                st.success(f"chat_id = `{st.session_state.chat_id}`")
-                st.rerun()
-
         if st.session_state.chat_id:
+            st.caption("chat_id")
             st.code(st.session_state.chat_id, language=None)
-
-        if st.button("Close chat") and st.session_state.chat_id:
-            out = _request("POST", "/chat/close", json={"chat_id": st.session_state.chat_id})
-            if out:
-                st.session_state.last_state = out.get("state")
-                _append_assistant_turn(out["state"])
-                st.rerun()
+        st.caption("No buttons: all actions happen via chat text.")
 
     col_chat, col_mem = st.columns([2, 1])
 
@@ -109,75 +95,52 @@ def main() -> None:
                 st.markdown(text)
 
         state = st.session_state.last_state or {}
-        closed = bool(state.get("chat_closed"))
+        nr = state.get("normalized_request")
+        if nr:
+            with st.expander("Normalized request (auto-reviewed via chat)", expanded=False):
+                st.json(nr)
 
-        if st.session_state.chat_id and not closed:
-            nr = state.get("normalized_request")
-            if nr:
-                with st.expander("Normalized request (review before Confirm)", expanded=False):
-                    st.json(nr)
-
-            awaiting_fb = bool(state.get("awaiting_user_feedback"))
-            has_norm = nr is not None
-            review_gate = awaiting_fb and has_norm
-
-            if review_gate:
-                st.caption("Review the normalized request, then **Confirm** or **Apply correction** (backend requires this before execution).")
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("Confirm", type="primary", key="btn_confirm"):
-                        out = _request(
-                            "POST",
-                            "/chat/confirm",
-                            json={"chat_id": st.session_state.chat_id},
-                        )
-                        if out:
-                            st.session_state.last_state = out["state"]
-                            _append_assistant_turn(out["state"])
-                            st.rerun()
-                with c2:
-                    corr = st.text_area("Correction", key="corr_text", placeholder="How should the normalized request change?", height=100)
-                    if st.button("Apply correction", key="btn_corr") and corr.strip():
-                        out = _request(
-                            "POST",
-                            "/chat/correction",
-                            json={
-                                "chat_id": st.session_state.chat_id,
-                                "correction_message": corr.strip(),
-                            },
-                        )
-                        if out:
-                            st.session_state.last_state = out["state"]
-                            _append_assistant_turn(out["state"])
-                            st.rerun()
-
-            # While a normalized request awaits review, do not use free-form chat (would be treated as correction by the API).
-            prompt = st.chat_input(
-                "Message",
-                disabled=closed or review_gate,
-                key="chat_in",
-            )
-            if prompt and st.session_state.chat_id and not review_gate:
+        prompt = st.chat_input("Message", key="chat_in")
+        if prompt:
+            # Lazily start a chat on first user message (no buttons).
+            if not st.session_state.chat_id:
+                out0 = _request(
+                    "POST",
+                    "/chat/turn",
+                    json={
+                        "chat_id": None,
+                        "user_id": st.session_state.user_id,
+                        "user_message": prompt,
+                    },
+                )
+                if out0:
+                    st.session_state.chat_id = out0["chat_id"]
+                    st.session_state.messages = []
+                    st.session_state.last_state = out0["state"]
+                    _append_assistant_turn(out0["state"])
+                    st.rerun()
+            if st.session_state.chat_id:
                 st.session_state.messages.append(("user", prompt))
                 out = _request(
                     "POST",
-                    "/chat/message",
-                    json={"chat_id": st.session_state.chat_id, "user_message": prompt},
+                    "/chat/turn",
+                    json={
+                        "chat_id": st.session_state.chat_id,
+                        "user_id": st.session_state.user_id,
+                        "user_message": prompt,
+                    },
                 )
                 if out:
+                    st.session_state.chat_id = out["chat_id"]
                     st.session_state.last_state = out["state"]
                     _append_assistant_turn(out["state"])
                     st.rerun()
-        elif closed:
-            st.info("Chat is closed. Start a new chat from the sidebar.")
 
     with col_mem:
         st.subheader("Memory candidates")
         if not st.session_state.chat_id:
             st.caption("Start a chat to load candidates for this chat_id.")
         else:
-            if st.button("Refresh list"):
-                st.rerun()
             data = _request(
                 "GET",
                 "/memory/candidates",
@@ -195,24 +158,7 @@ def main() -> None:
                             f"source {row.get('source')} · conf {row.get('confidence')}"
                         )
                         if row.get("status") == "candidate":
-                            b1, b2 = st.columns(2)
-                            cid = row["id"]
-                            with b1:
-                                if st.button("Confirm", key=f"mok_{cid}"):
-                                    r = _request(
-                                        "POST",
-                                        f"/memory/candidates/{cid}/confirm",
-                                        json={"user_id": st.session_state.user_id},
-                                    )
-                                    if r:
-                                        st.success("Confirmed.")
-                                        st.rerun()
-                            with b2:
-                                if st.button("Reject", key=f"mrj_{cid}"):
-                                    r = _request("POST", f"/memory/candidates/{cid}/reject")
-                                    if r is not None:
-                                        st.info("Rejected.")
-                                        st.rerun()
+                            st.caption("Confirm/reject this candidate via chat text (no buttons).")
 
 
 if __name__ == "__main__":

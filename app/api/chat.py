@@ -71,6 +71,56 @@ async def post_message(req: PostMessageRequest, session: Session = Depends(db_se
     return ChatStateResponse(state=result.state)
 
 
+class PostTurnRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "chat_id": None,
+                    "user_id": "alice",
+                    "user_message": "Hello, start a new chat and help me draft a short email.",
+                }
+            ]
+        }
+    )
+
+    chat_id: str | None = Field(
+        default=None,
+        description="Optional existing chat id. If omitted, the server will create a chat and continue in the same flow.",
+    )
+    user_id: str = Field(
+        min_length=1,
+        description="Opaque identifier for the human (scopes profile + memory). Required when chat_id is omitted.",
+        examples=["alice", "local-dev-user"],
+    )
+    user_message: str = Field(
+        min_length=1,
+        description="Raw user text for this turn. This is the single product entrypoint.",
+    )
+
+
+class ChatTurnResponse(BaseModel):
+    chat_id: str
+    state: ChatState
+
+
+@router.post("/turn", response_model=ChatTurnResponse)
+async def post_turn(req: PostTurnRequest, session: Session = Depends(db_session)):
+    svc = ChatService(session=session)
+    try:
+        chat_id, result = await svc.post_turn(
+            user_id=req.user_id,
+            chat_id=req.chat_id,
+            user_message=req.user_message,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        # Honest failure when no LLM providers are configured for intent routing.
+        raise HTTPException(status_code=503, detail=str(e))
+    return ChatTurnResponse(chat_id=chat_id, state=result.state)
+
+
 class PostCorrectionRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
