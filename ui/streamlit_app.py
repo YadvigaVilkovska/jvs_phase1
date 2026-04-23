@@ -139,7 +139,11 @@ def main() -> None:
                     baseline = (ui_state["understanding"].get("text") or "").strip()
                     current = review_text.strip()
                     if not current:
-                        st.error("Понимание не может быть пустым.")
+                        out = _request("POST", "/chat/reject", json={"chat_id": st.session_state.chat_id})
+                        if out:
+                            st.session_state.last_state = out["state"]
+                            _append_assistant_turn(out["state"])
+                            st.rerun()
                     else:
                         endpoint = "/chat/confirm" if current == baseline else "/chat/correction"
                         payload = {"chat_id": st.session_state.chat_id}

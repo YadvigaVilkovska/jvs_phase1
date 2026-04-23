@@ -140,6 +140,26 @@ async def confirm(req: ConfirmRequest, session: Session = Depends(db_session)):
     return _chat_state_response(result.state)
 
 
+class RejectRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"examples": [{"chat_id": "paste-chat_id-from-start"}]})
+
+    chat_id: str = Field(
+        min_length=1,
+        description="Rejects the proposed understanding and returns the chat to normal message flow.",
+        examples=["550e8400-e29b-41d4-a716-446655440000"],
+    )
+
+
+@router.post("/reject", response_model=ChatStateResponse)
+async def reject(req: RejectRequest, session: Session = Depends(db_session)):
+    svc = ChatService(session=session)
+    try:
+        result = await svc.reject(chat_id=req.chat_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _chat_state_response(result.state)
+
+
 class CloseChatRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={"examples": [{"chat_id": "paste-chat_id-from-start"}]})
 

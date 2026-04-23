@@ -128,6 +128,33 @@ def test_chat_response_exposes_ui_state(monkeypatch, api_client: TestClient):
     assert body["ui_state"]["understanding"]["text"] == "Draft a short reply"
 
 
+def test_chat_reject_exposes_ui_state(monkeypatch, api_client: TestClient):
+    class FakeResult:
+        def __init__(self):
+            self.state = ChatState(
+                chat_id="chat-1",
+                user_id="u1",
+                normalized_request=None,
+                awaiting_user_feedback=False,
+                awaiting_confirmation=False,
+            )
+
+    class FakeChatService:
+        def __init__(self, session):
+            self.session = session
+
+        async def reject(self, *, chat_id: str):
+            return FakeResult()
+
+    monkeypatch.setattr("app.api.chat.ChatService", FakeChatService)
+
+    r = api_client.post("/chat/reject", json={"chat_id": "chat-1"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ui_state"]["mode"] == ChatUiMode.CHAT
+    assert body["ui_state"]["understanding"]["visible"] is False
+
+
 def test_start_chat_exposes_ui_state(api_client: TestClient):
     r = api_client.post("/chat/start", json={"user_id": "u-start"})
     assert r.status_code == 200
@@ -143,6 +170,7 @@ def test_root_html_mentions_ui_state_contract(api_client: TestClient):
     assert "ui_state" in body
     assert "understanding_review" in body
     assert "clarification" in body
+    assert "/chat/reject" in body
     assert "defaultUiState" not in body
 
 

@@ -68,5 +68,8 @@ class ChatService:
     async def reject_review(self, *, chat_id: str) -> ChatTurnResult:
         return await self.orchestrator.reject_review(chat_id=chat_id)
 
+    async def reject(self, *, chat_id: str) -> ChatTurnResult:
+        return await self.orchestrator.reject_review(chat_id=chat_id)
+
     async def close(self, *, chat_id: str) -> ChatTurnResult:
         return await self.orchestrator.close(chat_id=chat_id)

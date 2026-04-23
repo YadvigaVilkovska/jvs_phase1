@@ -328,7 +328,7 @@ CHAT_HTML = dedent(
                 ? "Редактирование понимания..."
                 : "Напиши сообщение...";
 
-          sendBtn.disabled = !hasChat || closed || (mode === "understanding_review" && !reviewInputEl.value.trim());
+          sendBtn.disabled = !hasChat || closed;
           correctionBtn.disabled = !hasChat || !awaitingFeedback || closed;
           confirmBtn.disabled = !hasChat || !awaitingFeedback || closed;
           closeBtn.disabled = !hasChat || closed;
@@ -397,7 +397,12 @@ CHAT_HTML = dedent(
             const baseline = lastReviewText.trim();
             try {
               if (!current) {
-                addMessage("system", "Понимание не может быть пустым.");
+                const data = await api("/chat/reject", { chat_id: chatId });
+                const state = data.state;
+                for (const msg of state.assistant_messages || []) {
+                  addMessage("assistant", msg);
+                }
+                syncUiFromState(state, requireUiState(data));
                 return;
               }
               if (current === baseline) {
@@ -505,8 +510,18 @@ CHAT_HTML = dedent(
           if (!chatId) return;
           const current = reviewInputEl.value.trim();
           if (!current) {
-            addMessage("system", "Понимание не может быть пустым.");
-            return;
+            try {
+              const data = await api("/chat/reject", { chat_id: chatId });
+              const state = data.state;
+              for (const msg of state.assistant_messages || []) {
+                addMessage("assistant", msg);
+              }
+              syncUiFromState(state, requireUiState(data));
+              return;
+            } catch (e) {
+              addMessage("system", `Ошибка review: ${e.message}`);
+              return;
+            }
           }
 
           const baseline = lastReviewText.trim();

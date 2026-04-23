@@ -487,6 +487,29 @@ async def test_confirm_does_not_duplicate_normalized_requests(session: Session):
     assert len(after2) == 1
 
 
+@pytest.mark.asyncio
+async def test_reject_clears_understanding_and_allows_new_task(session: Session):
+    svc = ChatService(
+        session=session,
+        normalization_agent=FakeNormalizationAgent(),
+        execution_agent=FakeExecutionAgent(),
+    )
+    state0 = svc.start_chat(user_id="u1")
+
+    turn1 = await svc.post_user_message(chat_id=state0.chat_id, user_message="hello")
+    assert turn1.state.normalized_request is not None
+
+    rejected = await svc.reject(chat_id=state0.chat_id)
+    assert rejected.state.normalized_request is None
+    assert rejected.state.awaiting_user_feedback is False
+    assert rejected.state.awaiting_confirmation is False
+
+    turn2 = await svc.post_user_message(chat_id=state0.chat_id, user_message="new task")
+    assert turn2.state.normalized_request is not None
+    assert turn2.state.normalized_request.normalized_user_request == "normalize: new task"
+    assert turn2.state.normalized_request.revision == 1
+
+
 def test_chat_response_includes_ui_state():
     state = ChatState(chat_id="c1", user_id="u1")
 
