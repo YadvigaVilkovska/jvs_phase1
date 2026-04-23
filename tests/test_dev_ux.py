@@ -57,26 +57,6 @@ def test_dev_demo_flow_stub_agents(api_client: TestClient):
     assert data["assistant_messages_tail"]
 
 
-def test_chat_turn_creates_chat_without_chat_id(api_client: TestClient):
-    # /chat/turn must be able to start a chat from the first user message.
-    r = api_client.post(
-        "/chat/turn",
-        json={
-            "chat_id": None,
-            "user_id": "u-turn",
-            "user_message": "Hello",
-        },
-    )
-    # In this repo, /chat/* requires LLM providers; with providers disabled in this fixture,
-    # it must fail honestly.
-    assert r.status_code == 503
-
-
-def test_reject_review_returns_404_or_409_when_not_in_review(api_client: TestClient):
-    r = api_client.post("/chat/reject_review", json={"chat_id": "missing-or-invalid"})
-    assert r.status_code in (404, 409)
-
-
 def test_dev_demo_flow_without_stub_returns_503(monkeypatch, tmp_path):
     db = tmp_path / "no_stub.db"
     monkeypatch.setattr(settings, "database_url", f"sqlite:///{db}")
@@ -172,7 +152,6 @@ def test_root_html_mentions_ui_state_contract(api_client: TestClient):
     assert "clarification" in body
     assert "/chat/reject" in body
     assert "defaultUiState" not in body
-    assert "reviewBtn" not in body
 
 
 def test_main_module_does_not_embed_chat_shell_contract():

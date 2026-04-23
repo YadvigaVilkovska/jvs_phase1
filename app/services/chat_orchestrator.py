@@ -239,6 +239,7 @@ class ChatOrchestrator:
             raise ValueError("chat is not awaiting review")
         state.awaiting_user_feedback = False
         state.awaiting_confirmation = False
+        state.normalized_request = None
         state.execution_status = "idle"
         state.assistant_messages.append("Запрос не подтверждён. Сформулируйте новый запрос заново.")
         chat.status = "active"

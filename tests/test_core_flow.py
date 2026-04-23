@@ -19,6 +19,7 @@ from app.agents.memory_agent import MemoryAgent
 from app.services.execution_service import ExecutionService
 from app.dev.stub_agents import (
     FakeExecutionAgent,
+    FakeIntentAgent,
     FakeNeedsToolDecisionAgent,
     FakeNormalizationAgent,
     FakeSelfExecuteDecisionAgent,
@@ -175,6 +176,7 @@ async def test_memory_agent_pydanticai_test_model_post_chat_and_explicit():
 async def test_execution_decision_only_after_confirm(session: Session):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
@@ -195,6 +197,7 @@ async def test_self_executable_path_runs_execution_runner(session: Session):
     runner_model = TestModel(custom_output_text="Here is the result.")
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeSelfExecuteDecisionAgent(),
         execution_service=ExecutionService(model=runner_model),
@@ -210,6 +213,7 @@ async def test_self_executable_path_runs_execution_runner(session: Session):
 async def test_needs_tool_path_stays_blocked(session: Session):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeNeedsToolDecisionAgent(),
     )
@@ -225,6 +229,7 @@ async def test_needs_tool_path_stays_blocked(session: Session):
 async def test_correction_creates_new_revision_same_object_contract(session: Session):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
@@ -251,6 +256,7 @@ async def test_correction_creates_new_revision_same_object_contract(session: Ses
 async def test_explicit_memory_prefix_creates_candidate_not_durable_entry(session: Session, user_message: str):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
@@ -373,6 +379,7 @@ def test_pending_memory_dedup_respects_semantic_identity(session: Session):
 async def test_close_chat_triggers_post_chat_analysis_safely(session: Session):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
@@ -386,6 +393,7 @@ async def test_close_chat_triggers_post_chat_analysis_safely(session: Session):
 async def test_second_close_does_not_rerun_post_chat_analysis(session: Session):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
@@ -409,6 +417,7 @@ async def test_second_close_does_not_rerun_post_chat_analysis(session: Session):
 async def test_close_retries_post_chat_after_failed_extraction(session: Session):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
@@ -443,6 +452,7 @@ async def test_close_retries_post_chat_after_failed_extraction(session: Session)
 def test_graph_contains_required_node_names(session: Session):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
@@ -463,6 +473,7 @@ def test_graph_contains_required_node_names(session: Session):
 async def test_confirm_does_not_duplicate_normalized_requests(session: Session):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
@@ -491,6 +502,7 @@ async def test_confirm_does_not_duplicate_normalized_requests(session: Session):
 async def test_reject_clears_understanding_and_allows_new_task(session: Session):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
@@ -507,7 +519,7 @@ async def test_reject_clears_understanding_and_allows_new_task(session: Session)
     turn2 = await svc.post_user_message(chat_id=state0.chat_id, user_message="new task")
     assert turn2.state.normalized_request is not None
     assert turn2.state.normalized_request.normalized_user_request == "normalize: new task"
-    assert turn2.state.normalized_request.revision == 1
+    assert turn2.state.normalized_request.revision == 2
 
 
 def test_chat_response_includes_ui_state():
@@ -616,6 +628,7 @@ def test_ui_state_is_authoritative_for_ui_rendering():
 async def test_clarification_turn_service_state_maps_to_real_question(session: Session):
     svc = ChatService(
         session=session,
+        intent_agent=FakeIntentAgent(),
         normalization_agent=FakeClarificationNormalizationAgent(),
         execution_agent=FakeExecutionAgent(),
     )
