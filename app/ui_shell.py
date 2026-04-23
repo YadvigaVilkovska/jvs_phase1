@@ -224,9 +224,6 @@ CHAT_HTML = dedent(
           <div class="ui-state-title" id="uiStateTitle"></div>
           <div class="ui-state-question" id="uiStateQuestion"></div>
           <textarea id="reviewInput" placeholder=""></textarea>
-          <div class="actions">
-            <button id="reviewBtn" class="secondary">OK</button>
-          </div>
         </div>
 
         <div class="composer">
@@ -244,7 +241,6 @@ CHAT_HTML = dedent(
         const uiStateTitleEl = document.getElementById("uiStateTitle");
         const uiStateQuestionEl = document.getElementById("uiStateQuestion");
         const reviewInputEl = document.getElementById("reviewInput");
-        const reviewBtn = document.getElementById("reviewBtn");
         const inputEl = document.getElementById("input");
         const statusEl = document.getElementById("status");
         const metaEl = document.getElementById("meta");

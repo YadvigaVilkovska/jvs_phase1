@@ -172,6 +172,7 @@ def test_root_html_mentions_ui_state_contract(api_client: TestClient):
     assert "clarification" in body
     assert "/chat/reject" in body
     assert "defaultUiState" not in body
+    assert "reviewBtn" not in body
 
 
 def test_main_module_does_not_embed_chat_shell_contract():
