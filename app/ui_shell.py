@@ -214,7 +214,6 @@ CHAT_HTML = dedent(
           <div class="status" id="status">Нет активного чата</div>
           <div class="top-actions">
             <button id="startBtn">Start chat</button>
-            <button id="confirmBtn" class="secondary" disabled>Confirm</button>
             <button id="closeBtn" class="danger" disabled>Close chat</button>
           </div>
         </div>
@@ -234,9 +233,8 @@ CHAT_HTML = dedent(
           <textarea id="input" placeholder="Напиши сообщение..."></textarea>
           <div class="actions">
             <button id="sendBtn" disabled>Send message</button>
-            <button id="correctionBtn" class="secondary" disabled>Send correction</button>
           </div>
-          <div class="status" id="meta">Обычный flow: Start → Message → Confirm / Correction</div>
+          <div class="status" id="meta">Обычный flow: Start → Message → Review</div>
         </div>
       </div>
 
@@ -252,8 +250,6 @@ CHAT_HTML = dedent(
         const metaEl = document.getElementById("meta");
         const startBtn = document.getElementById("startBtn");
         const sendBtn = document.getElementById("sendBtn");
-        const correctionBtn = document.getElementById("correctionBtn");
-        const confirmBtn = document.getElementById("confirmBtn");
         const closeBtn = document.getElementById("closeBtn");
 
         let chatId = null;
@@ -314,7 +310,6 @@ CHAT_HTML = dedent(
                 : "";
 
           reviewInputEl.hidden = mode !== "understanding_review";
-          reviewBtn.hidden = true;
           if (mode === "understanding_review") {
             reviewInputEl.value = understandingText;
             lastReviewText = understandingText;
@@ -329,18 +324,14 @@ CHAT_HTML = dedent(
                 : "Напиши сообщение...";
 
           sendBtn.disabled = !hasChat || closed;
-          correctionBtn.disabled = !hasChat || !awaitingFeedback || closed;
-          confirmBtn.disabled = !hasChat || !awaitingFeedback || closed;
           closeBtn.disabled = !hasChat || closed;
-          correctionBtn.hidden = mode === "clarification";
-          confirmBtn.hidden = mode === "clarification";
           sendBtn.textContent =
             mode === "understanding_review" ? "OK" : mode === "clarification" ? "Send answer" : "Send message";
 
           metaEl.textContent =
             hasChat
               ? `chat_id=${chatId} · ui_mode=${mode} · awaiting_feedback=${awaitingFeedback} · awaiting_confirmation=${awaitingConfirmation} · execution_status=${state?.execution_status ?? "idle"}`
-              : "Обычный flow: Start → Message → Confirm / Correction";
+              : "Обычный flow: Start → Message → Review";
         }
 
         async function api(path, payload) {
@@ -454,45 +445,6 @@ CHAT_HTML = dedent(
           }
         };
 
-        correctionBtn.onclick = async () => {
-          const text = inputEl.value.trim();
-          if (!text || !chatId) return;
-
-          try {
-            addMessage("user", `[correction] ${text}`);
-            inputEl.value = "";
-
-            const data = await api("/chat/correction", {
-              chat_id: chatId,
-              correction_message: text,
-            });
-
-            const state = data.state;
-            for (const msg of state.assistant_messages || []) {
-              addMessage("assistant", msg);
-            }
-            syncUiFromState(state, requireUiState(data));
-          } catch (e) {
-            addMessage("system", `Ошибка correction: ${e.message}`);
-          }
-        };
-
-        confirmBtn.onclick = async () => {
-          if (!chatId) return;
-
-          try {
-            const data = await api("/chat/confirm", { chat_id: chatId });
-            const state = data.state;
-
-            for (const msg of state.assistant_messages || []) {
-              addMessage("assistant", msg);
-            }
-            syncUiFromState(state, requireUiState(data));
-          } catch (e) {
-            addMessage("system", `Ошибка confirm: ${e.message}`);
-          }
-        };
-
         closeBtn.onclick = async () => {
           if (!chatId) return;
 
@@ -506,49 +458,6 @@ CHAT_HTML = dedent(
           }
         };
 
-        reviewBtn.onclick = async () => {
-          if (!chatId) return;
-          const current = reviewInputEl.value.trim();
-          if (!current) {
-            try {
-              const data = await api("/chat/reject", { chat_id: chatId });
-              const state = data.state;
-              for (const msg of state.assistant_messages || []) {
-                addMessage("assistant", msg);
-              }
-              syncUiFromState(state, requireUiState(data));
-              return;
-            } catch (e) {
-              addMessage("system", `Ошибка review: ${e.message}`);
-              return;
-            }
-          }
-
-          const baseline = lastReviewText.trim();
-          try {
-            if (current === baseline) {
-              const data = await api("/chat/confirm", { chat_id: chatId });
-              const state = data.state;
-              for (const msg of state.assistant_messages || []) {
-                addMessage("assistant", msg);
-              }
-              syncUiFromState(state, requireUiState(data));
-              return;
-            }
-
-            const data = await api("/chat/correction", {
-              chat_id: chatId,
-              correction_message: current,
-            });
-            const state = data.state;
-            for (const msg of state.assistant_messages || []) {
-              addMessage("assistant", msg);
-            }
-            syncUiFromState(state, requireUiState(data));
-          } catch (e) {
-            addMessage("system", `Ошибка review: ${e.message}`);
-          }
-        };
       </script>
     </body>
     </html>
