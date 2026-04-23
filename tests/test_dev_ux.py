@@ -1,6 +1,10 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.ui_state import ChatUiMode
+from app.api.ui_state import require_ui_state
+from app.domain.chat_state import ChatState
+from app.domain.normalized_user_request import NormalizedUserRequest
 from app.main import create_app
 from app.settings import settings
 
@@ -85,3 +89,69 @@ def test_dev_demo_flow_without_stub_returns_503(monkeypatch, tmp_path):
         r = client.post("/dev/demo-flow", json={"user_id": "u", "user_message": "x"})
     assert r.status_code == 503
     assert "DeepSeek" in r.json()["detail"] or "LLM" in r.json()["detail"] or "disabled" in r.json()["detail"].lower()
+
+
+def test_chat_response_exposes_ui_state(monkeypatch, api_client: TestClient):
+    req = NormalizedUserRequest(
+        normalized_user_request="Draft a short reply",
+        continuity="new",
+        needs_clarification=False,
+        clarification_reason=None,
+        clarification_options=[],
+        ambiguity_handling="none",
+        revision=1,
+    )
+
+    class FakeResult:
+        def __init__(self):
+            self.state = ChatState(
+                chat_id="chat-1",
+                user_id="u1",
+                normalized_request=req,
+                awaiting_user_feedback=True,
+            )
+
+    class FakeChatService:
+        def __init__(self, session):
+            self.session = session
+
+        async def post_user_message(self, *, chat_id: str, user_message: str):
+            return FakeResult()
+
+    monkeypatch.setattr("app.api.chat.ChatService", FakeChatService)
+
+    r = api_client.post("/chat/message", json={"chat_id": "chat-1", "user_message": "hello"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ui_state"]["mode"] == "understanding_review"
+    assert body["ui_state"]["understanding"]["visible"] is True
+    assert body["ui_state"]["understanding"]["text"] == "Draft a short reply"
+
+
+def test_start_chat_exposes_ui_state(api_client: TestClient):
+    r = api_client.post("/chat/start", json={"user_id": "u-start"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ui_state"]["mode"] == ChatUiMode.CHAT
+    assert body["ui_state"]["understanding"]["visible"] is False
+
+
+def test_root_html_mentions_ui_state_contract(api_client: TestClient):
+    r = api_client.get("/")
+    assert r.status_code == 200
+    body = r.text
+    assert "ui_state" in body
+    assert "understanding_review" in body
+    assert "clarification" in body
+    assert "defaultUiState" not in body
+
+
+def test_main_module_does_not_embed_chat_shell_contract():
+    from app import main as main_module
+
+    assert not hasattr(main_module, "CHAT_HTML")
+
+
+def test_streamlit_requires_ui_state_contract():
+    with pytest.raises(ValueError, match="ui_state is required"):
+        require_ui_state({})

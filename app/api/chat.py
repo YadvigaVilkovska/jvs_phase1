@@ -5,8 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import Session
 
 from app.api.deps import db_session
+from app.api.ui_state import ChatUiState, build_ui_state
 from app.domain.chat_state import ChatState
-from app.services.chat_orchestrator import CriticalTurnError
 from app.services.chat_service import ChatService
 
 
@@ -25,13 +25,14 @@ class StartChatRequest(BaseModel):
 
 class StartChatResponse(BaseModel):
     chat_id: str
+    ui_state: ChatUiState
 
 
 @router.post("/start", response_model=StartChatResponse)
 def start_chat(req: StartChatRequest, session: Session = Depends(db_session)):
     svc = ChatService(session=session)
     state = svc.start_chat(user_id=req.user_id)
-    return StartChatResponse(chat_id=state.chat_id)
+    return StartChatResponse(chat_id=state.chat_id, ui_state=build_ui_state(state))
 
 
 class PostMessageRequest(BaseModel):
@@ -59,7 +60,16 @@ class PostMessageRequest(BaseModel):
 
 
 class ChatStateResponse(BaseModel):
+    """Chat API response with raw state plus authoritative UI-facing state."""
+
     state: ChatState
+    ui_state: ChatUiState
+
+
+def _chat_state_response(state: ChatState) -> ChatStateResponse:
+    """Build the transport response in one place so ui_state stays deterministic."""
+
+    return ChatStateResponse(state=state, ui_state=build_ui_state(state))
 
 
 @router.post("/message", response_model=ChatStateResponse)
@@ -67,73 +77,9 @@ async def post_message(req: PostMessageRequest, session: Session = Depends(db_se
     svc = ChatService(session=session)
     try:
         result = await svc.post_user_message(chat_id=req.chat_id, user_message=req.user_message)
-    except CriticalTurnError as e:
-        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
-        msg = str(e)
-        if msg == "chat not found":
-            raise HTTPException(status_code=404, detail=msg)
-        if msg == "review_pending_use_confirm_or_reject":
-            raise HTTPException(status_code=409, detail=msg)
-        raise HTTPException(status_code=400, detail=msg)
-    return ChatStateResponse(state=result.state)
-
-
-class PostTurnRequest(BaseModel):
-    model_config = ConfigDict(
-        json_schema_extra={
-            "examples": [
-                {
-                    "chat_id": None,
-                    "user_id": "alice",
-                    "user_message": "Hello, start a new chat and help me draft a short email.",
-                }
-            ]
-        }
-    )
-
-    chat_id: str | None = Field(
-        default=None,
-        description="Optional existing chat id. If omitted, the server will create a chat and continue in the same flow.",
-    )
-    user_id: str = Field(
-        min_length=1,
-        description="Opaque identifier for the human (scopes profile + memory). Required when chat_id is omitted.",
-        examples=["alice", "local-dev-user"],
-    )
-    user_message: str = Field(
-        min_length=1,
-        description="Raw user text for this turn. This is the single product entrypoint.",
-    )
-
-
-class ChatTurnResponse(BaseModel):
-    chat_id: str
-    state: ChatState
-
-
-@router.post("/turn", response_model=ChatTurnResponse)
-async def post_turn(req: PostTurnRequest, session: Session = Depends(db_session)):
-    svc = ChatService(session=session)
-    try:
-        chat_id, result = await svc.post_turn(
-            user_id=req.user_id,
-            chat_id=req.chat_id,
-            user_message=req.user_message,
-        )
-    except CriticalTurnError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except ValueError as e:
-        msg = str(e)
-        if msg == "chat not found":
-            raise HTTPException(status_code=404, detail=msg)
-        if msg == "review_pending_use_confirm_or_reject":
-            raise HTTPException(status_code=409, detail=msg)
-        raise HTTPException(status_code=400, detail=msg)
-    except RuntimeError as e:
-        # Honest failure when no LLM providers are configured for intent routing.
-        raise HTTPException(status_code=503, detail=str(e))
-    return ChatTurnResponse(chat_id=chat_id, state=result.state)
+        raise HTTPException(status_code=404, detail=str(e))
+    return _chat_state_response(result.state)
 
 
 class PostCorrectionRequest(BaseModel):
@@ -169,11 +115,9 @@ async def post_correction(req: PostCorrectionRequest, session: Session = Depends
     svc = ChatService(session=session)
     try:
         result = await svc.post_correction(chat_id=req.chat_id, correction_message=req.correction_message)
-    except CriticalTurnError as e:
-        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return ChatStateResponse(state=result.state)
+    return _chat_state_response(result.state)
 
 
 class ConfirmRequest(BaseModel):
@@ -192,30 +136,8 @@ async def confirm(req: ConfirmRequest, session: Session = Depends(db_session)):
     try:
         result = await svc.confirm(chat_id=req.chat_id)
     except ValueError as e:
-        detail = str(e)
-        if "not found" in detail:
-            raise HTTPException(status_code=404, detail=detail)
-        raise HTTPException(status_code=400, detail=detail)
-    return ChatStateResponse(state=result.state)
-
-
-class RejectReviewRequest(BaseModel):
-    chat_id: str = Field(..., min_length=1)
-
-
-@router.post("/reject_review", response_model=ChatStateResponse)
-async def reject_review(req: RejectReviewRequest, session: Session = Depends(db_session)):
-    svc = ChatService(session=session)
-    try:
-        result = await svc.reject_review(chat_id=req.chat_id)
-    except ValueError as e:
-        msg = str(e)
-        if msg == "chat not found":
-            raise HTTPException(status_code=404, detail=msg)
-        if msg == "chat is not awaiting review":
-            raise HTTPException(status_code=409, detail=msg)
-        raise HTTPException(status_code=400, detail=msg)
-    return ChatStateResponse(state=result.state)
+        raise HTTPException(status_code=404, detail=str(e))
+    return _chat_state_response(result.state)
 
 
 class CloseChatRequest(BaseModel):
@@ -235,4 +157,4 @@ async def close_chat(req: CloseChatRequest, session: Session = Depends(db_sessio
         result = await svc.close(chat_id=req.chat_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return ChatStateResponse(state=result.state)
+    return _chat_state_response(result.state)
